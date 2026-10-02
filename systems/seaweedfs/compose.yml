@@ -1,0 +1,47 @@
+name: seaweedfs
+# Every node runs a master (raft of 3), a volume server, a filer and an S3
+# gateway. Replication 002 keeps 3 copies on 3 different servers, like Garage.
+# The master leader is elected: run_warp.sh records which node holds it.
+# A filer that starts before its peers exits while bootstrapping its
+# metadata from them, so the nodes are allowed to restart a few times.
+x-node: &node
+  image: chrislusf/seaweedfs:4.48
+  restart: on-failure:5
+  mem_limit: 1g
+  networks: [bench]
+services:
+  node1:
+    <<: *node
+    container_name: seaweedfs-node1
+    hostname: seaweedfs-node1
+    command: >-
+      server -ip=seaweedfs-node1 -ip.bind=0.0.0.0 -dir=/data
+      -master.peers=seaweedfs-node1:9333,seaweedfs-node2:9333,seaweedfs-node3:9333
+      -master.defaultReplication=002 -master.volumeSizeLimitMB=512
+      -volume.max=16 -filer -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json
+    volumes: [./s3.json:/etc/seaweedfs/s3.json:ro, d1:/data]
+  node2:
+    <<: *node
+    container_name: seaweedfs-node2
+    hostname: seaweedfs-node2
+    command: >-
+      server -ip=seaweedfs-node2 -ip.bind=0.0.0.0 -dir=/data
+      -master.peers=seaweedfs-node1:9333,seaweedfs-node2:9333,seaweedfs-node3:9333
+      -master.defaultReplication=002 -master.volumeSizeLimitMB=512
+      -volume.max=16 -filer -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json
+    volumes: [./s3.json:/etc/seaweedfs/s3.json:ro, d2:/data]
+  node3:
+    <<: *node
+    container_name: seaweedfs-node3
+    hostname: seaweedfs-node3
+    command: >-
+      server -ip=seaweedfs-node3 -ip.bind=0.0.0.0 -dir=/data
+      -master.peers=seaweedfs-node1:9333,seaweedfs-node2:9333,seaweedfs-node3:9333
+      -master.defaultReplication=002 -master.volumeSizeLimitMB=512
+      -volume.max=16 -filer -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json
+    volumes: [./s3.json:/etc/seaweedfs/s3.json:ro, d3:/data]
+volumes: {d1: {}, d2: {}, d3: {}}
+networks:
+  bench:
+    name: bench
+    external: true

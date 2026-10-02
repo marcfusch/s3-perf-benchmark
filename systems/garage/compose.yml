@@ -1,0 +1,29 @@
+name: garage
+x-node: &node
+  image: dxflrs/garage:v2.4.1
+  restart: "no"
+  mem_limit: 1g
+  volumes:
+    - ./garage.toml:/etc/garage.toml:ro
+  networks: [bench]
+services:
+  node1:
+    <<: *node
+    container_name: garage-node1
+    hostname: garage-node1
+    volumes: [./garage.toml:/etc/garage.toml:ro, d1:/var/lib/garage]
+  node2:
+    <<: *node
+    container_name: garage-node2
+    hostname: garage-node2
+    volumes: [./garage.toml:/etc/garage.toml:ro, d2:/var/lib/garage]
+  node3:
+    <<: *node
+    container_name: garage-node3
+    hostname: garage-node3
+    volumes: [./garage.toml:/etc/garage.toml:ro, d3:/var/lib/garage]
+volumes: {d1: {}, d2: {}, d3: {}}
+networks:
+  bench:
+    name: bench
+    external: true

@@ -1,0 +1,14 @@
+{
+  "identities": [
+    {
+      "name": "bench",
+      "credentials": [
+        {
+          "accessKey": "GK5e1c0ffee5e1c0ffee5e1c0f",
+          "secretKey": "6d676c3837306265636e636873656372657462656e6368736563726574000001"
+        }
+      ],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}
