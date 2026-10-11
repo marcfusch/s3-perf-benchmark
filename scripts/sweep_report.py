@@ -54,7 +54,7 @@ for key, runs in groups.items():
                  "p99_ratio": round(med(runs, "p99") / med(base, "p99"), 2),
                  "rep_spread": round(spread, 3), "errors": sum(x["errors"] for x in runs)})
 
-order = {"none": 0, "cpu": 1, "disk": 2, "net": 3, "all": 4}
+order = {"none": 0, "cpu": 1, "disk": 2, "net": 3, "all": 4, "hdd": 5}
 sizes = {"16KiB": 0, "1MiB": 1, "8MiB": 2}
 rows.sort(key=lambda x: (x["system"], x["op"], sizes.get(x["size"], 9), order[x["resource"]],
                          x["factor"], x["n_degraded"]))
