@@ -1,0 +1,438 @@
+#set page(
+  header: [ _Marc Fuschino_ #h(1fr) MGL870 ],
+  footer: [
+    #context [ Page #counter(page).display() #h(1fr) ]
+  ]
+)
+#set heading(numbering: "1.1.1.1")
+#set par(justify: true)
+#linebreak() #linebreak() #linebreak() #linebreak()
+#align(center)[
+  #set text(26pt)
+  *Distributed Object Storage on Bad Hardware*
+]
+
+#align(center)[
+  #set text(24pt, weight: "semibold")
+  MGL870 - Final Report
+]
+#align(center)[
+  #set text(18pt)
+  Made by Marc Fuschino
+]
+#linebreak()
+#outline()
+#pagebreak()
+
+= Summary
+
+// RESULTS: written at the end.
+
+= Context and Questions
+
+Hardware is expensive, so many people build storage from old, mismatched machines:
+a fast NVMe box next to an old laptop with a spinning disk and a weak link. Three S3
+systems target this kind of use, each with a different design idea:
+
+- *Garage* is built for cheap, mismatched nodes on slow links (Deuxfleurs).
+- *MinIO* is built for identical machines in a datacenter (MinIO docs).
+- *SeaweedFS* is built for many small files, with a central master for metadata
+  (SeaweedFS docs).
+
+Published benchmarks run them on identical machines. That is the one case where these
+design ideas do not matter. We ask:
+
+*Q1.* How much performance does each system lose when the nodes are not identical?
+
+*Q2.* How long does a rebuild take after a node dies, and how slow is the service
+during the rebuild?
+
+*Q3.* Does the cluster run at the speed of its average node, or of its weakest node?
+
+We never rank the systems. Each system is measured on identical nodes, then on
+degraded nodes, and we report how much it loses.
+
+= Test Bench
+
+== Clusters
+
+Each system runs as a cluster of three nodes, one container per node, all on one
+machine.
+
+#figure(
+  table(
+    columns: (auto, auto, 1fr),
+    inset: 5pt,
+    align: (left, left, left),
+    table.header([*System*], [*Version*], [*Redundancy and roles*]),
+    [Garage], [v2.4.1], [3 copies of each block, one zone per node],
+    [MinIO], [RELEASE.2025-10-15], [erasure coding on 3 drives: 2 data + 1 parity (default)],
+    [SeaweedFS], [4.48], [3 copies (replication 002); each node runs master, volume server, filer and S3 gateway],
+  ),
+  caption: [Systems under test. All other settings are defaults.],
+)
+
+We keep default settings. Tuning one system more than another would change the
+result more than the hardware does. MinIO no longer publishes container images and
+its repository is archived, so we build it from its last release tag.
+
+The systems do not protect data the same way (full copies against erasure coding).
+This is one more reason to compare each system only with itself.
+
+== How a node is made slow
+
+We do not use real slow machines. We limit each container with Linux kernel
+features, which makes every condition exactly reproducible:
+
+- *CPU*: cgroup `cpu.max`. Memory is fixed at 1 GB per node.
+- *Disk*: cgroup `io.max`, which caps bytes per second and operations per second
+  (IOPS) for reads and writes (Linux kernel docs, cgroup v2).
+- *Network*: `tc netem` caps the outgoing rate and adds delay; incoming traffic is
+  capped at the same rate (tc-netem man page).
+
+A nominal node has 1 CPU, 25 MiB/s read, 40 MiB/s write, 800 read IOPS, 600 write
+IOPS, and a 1 Gbit/s link with 1 ms delay.
+
+*The total budget of the cluster never changes.* When a node is made $k$ times
+slower, it gets $1 slash k$ of the nominal resources, and what it loses is shared
+between the healthy nodes. Only the split changes. (Delay is the exception: a slow
+node gets $k$ times the nominal delay.)
+
+This makes Q3 easy to read. Let $r$ be the throughput divided by the throughput on
+identical nodes. If the cluster ran at the speed of its average node, $r$ would stay
+at 1, since the total budget is the same. If it ran at the speed of its weakest node,
+$r$ would drop to $1 slash k$. We report
+$ W = (1 - r) / (1 - 1 slash k) $
+$W = 0$ means the cluster follows its average node. $W = 1$ means it follows its
+weakest node. $W > 1$ means it does even worse than its weakest node.
+
+== Load and measurements
+
+The load comes from warp, an S3 benchmark tool (MinIO, warp). warp runs in its own
+container with 2 CPU, outside the cluster budget. It sends requests to the three
+nodes in turn (round robin), so the client never avoids a slow node: avoiding it is
+the job of the storage system. warp records every request: start, end, size, node
+and error.
+
+== Software stack
+
+#figure(
+  table(
+    columns: (auto, 1fr),
+    inset: 5pt,
+    align: (left, left),
+    table.header([*Layer*], [*Role*]),
+    [macOS laptop], [Apple M series, 8 cores, 8 GB. Runs the scripts and the analysis.],
+    [Colima], [Runs a small Linux virtual machine (Ubuntu, kernel 6.8, 6 vCPU, 6 GB,
+      15 GB disk) with Docker inside. We need it because containers and cgroup v2 limits
+      exist only on Linux (Colima).],
+    [Docker Compose], [One file per system describes its three nodes, their disks and
+      their network (Docker docs).],
+    [cgroup v2, tc], [Kernel features that make a node slow.],
+    [warp], [S3 load generator.],
+    [Helper image], [Alpine Linux with fio, stress-ng, iperf3 and Python: calibration
+      probes, resource sampler, a second S3 client (boto3) and data checks.],
+    [Python and uv], [Analysis and figures (matplotlib) on the laptop. uv installs the
+      libraries each script needs (Astral, uv).],
+  ),
+  caption: [Layers of the bench],
+)
+
+Every run follows the same steps:
+
++ `up.sh` starts an empty cluster and waits until it is healthy.
++ `limits.sh` applies the condition and saves it to `limits.json`.
++ `run_warp.sh` starts warp. At the same time, a sampler reads every second the CPU,
+  memory, disk and network counters of each node and of the client.
++ `down.sh` deletes the cluster and its data.
++ `summarize.py` turns the raw data into one summary per run: throughput, latency
+  percentiles (overall and per node) and resources per node.
+
+A campaign is a list of runs in random order. Random order spreads slow periods of
+the machine over all conditions instead of hitting one of them. Campaigns can be
+stopped and restarted: finished runs are skipped. The raw data is kept, so every
+number in this report can be traced back to the requests behind it.
+
+== Checking the bench first
+
+Before measuring the systems, we checked the bench itself.
+
+*Limits.* Three probe containers got exactly the same limits as the nodes. We
+measured them with fio (disk), stress-ng (CPU), iperf3 (network) and ping. The disk
+limits held within 5 % in every condition, including the extreme one (two nodes
+10 times slower, one node at 2.8 times the nominal). The network reached 92 to 96 %
+of its rate. The measured round trip was about 1.4 times the configured delay, but
+the ratios between nodes were kept. The CPU limit held within 5 %, except at 0.2 CPU
+(85 % of the target). Our first disk budget was too high for the virtual disk, so we
+lowered it: otherwise the machine, not our limits, would have set the speed.
+
+*Repeatability.* We ran each system five times on identical nodes. Results varied by
+less than 5 % between runs, and the load was spread evenly over the nodes (within
+7 %). SeaweedFS writes were the exception: they come in bursts while buffered data is
+flushed to disk. Longer write runs (60 s) reduce this.
+
+*Load generator.* warp is made by MinIO, one of the vendors we test, so we checked it
+instead of trusting it. *warp versions 1.1.0 to 1.3.1 send almost identical objects*:
+out of 60 objects written by v1.3.1, only 1 to 5 were different. Garage removes
+duplicate 1 MiB blocks, so it stored almost nothing and its writes looked twice as
+fast as they are (48.5 instead of 24.1 MiB/s). MinIO and SeaweedFS do not remove
+duplicates and were not affected. We use warp v1.0.8, which sends 100 different
+objects out of 100.
+
+A second client written with boto3 (AWS) agrees with warp within 10 % on Garage and
+MinIO, once both send the same kind of request. Recent boto3 versions skip the
+payload checksum by default, and this alone made Garage, which is limited by its CPU,
+look 2.5 times faster. On SeaweedFS the two clients still differ by 30 to 47 %; we did
+not find why. Our ratios always compare runs made with the same client, so they are
+less affected than absolute numbers. Finally, the client never used more than a
+quarter of its CPU, so it never limited the results.
+
+= Method
+
+== Sweeps
+
+We start from a reference point: one node out of three, all resources 5 times
+slower, 1 MiB objects. Then we change one thing at a time:
+
+#figure(
+  table(
+    columns: (auto, auto, 1fr),
+    inset: 5pt,
+    align: (center, left, left),
+    table.header([*Sweep*], [*Values*], [*Question*]),
+    [S1], [CPU, disk, network, all three], [Which resource matters most?],
+    [S2], [1, 2, 5, 10 times slower], [Is the loss gradual or sudden?],
+    [S3], [0, 1 or 2 slow nodes], [Does losing the majority change things?],
+    [S4], [16 KiB, 1 MiB, 8 MiB objects], [Does object size change the loss?],
+  ),
+  caption: [The four sweeps],
+)
+
+Each condition is measured for writes (PUT, 60 s) and reads (GET, 30 s on about
+200 MiB of objects), three times, in random order, each time on a new cluster. For S4
+we also measure identical nodes at each object size, so we always compare the same
+size. We report medians.
+
+== Node kill campaigns
+
+Each campaign follows these steps:
+
++ Start a new cluster and write 500 objects of 1 MiB of random data. Keep the SHA256
+  of each object.
++ Read the objects continuously.
++ After 60 s, kill one node and delete its disk.
++ 60 s later, read back every object and check its SHA256.
++ Replace the dead node with an empty one and apply the procedure each system
+  documents. Garage needs a new layout, and must be told the old node is gone for good
+  (Deuxfleurs). MinIO repairs the new drive on its own. SeaweedFS needs an operator to
+  run `volume.fix.replication` (SeaweedFS docs).
++ Wait until the new node holds 95 % of the bytes of the other nodes: the rebuild is
+  done.
++ Keep reading for 60 s, then check every object one last time.
+
+The client only talks to the two nodes that are never killed. This way, a dead
+gateway is not counted as a storage failure.
+
+We run three scenarios, twice per system:
+
+- identical nodes, one node killed;
+- one slow node (all resources, 5 times slower), and that slow node is killed;
+- one slow node, and a healthy node is killed. The slow node must then help rebuild.
+
+A system is reliable here if every object stays readable while a node is dead, and
+after the rebuild.
+
+= Results
+
+The 216 sweep runs all finished. The median difference between the three repetitions
+of a point is 5 %, and only one request failed in total. In what follows, $r$ is the
+median throughput of a condition divided by the median throughput on identical nodes
+(same system, same operation, same object size).
+
+#figure(
+  table(
+    columns: (auto, auto, auto, auto, auto),
+    inset: 5pt,
+    align: (left, right, right, right, right),
+    table.header([*System, op*], [*Identical nodes*], [*$r$ at 2x*], [*$r$ at 5x*], [*$r$ at 10x*]),
+    [Garage PUT], [36 MiB/s], [0.58], [0.39], [0.09],
+    [Garage GET], [205 MiB/s], [0.77], [0.33], [0.07],
+    [MinIO PUT], [71 MiB/s], [0.49], [0.18], [0.09],
+    [MinIO GET], [151 MiB/s], [0.66], [0.24], [0.11],
+    [SeaweedFS PUT], [21 MiB/s], [0.65], [0.34], [0.20],
+    [SeaweedFS GET], [155 MiB/s], [0.62], [0.26], [0.13],
+  ),
+  caption: [One node out of three slowed down on all resources, 1 MiB objects. If the
+  cluster followed its weakest node, $r$ would be 0.50, 0.20 and 0.10.],
+)<tab-s2>
+
+== Q1 and Q3: the cluster follows its weakest node
+
+With one node 5 times slower, every system loses 61 to 82 % of its throughput
+(@tab-s2, @fig-s2), even though the cluster has the same total resources. A cluster
+that followed its average node would lose nothing. One that followed its weakest node
+would lose 80 %. Our results are close to the second case: $W$ is 0.76 to 1.02 at 5x,
+and 0.89 to 1.03 at 10x.
+
+- MinIO writes follow the weakest node almost exactly ($W$ 1.01 to 1.03).
+- Garage and SeaweedFS writes do a bit better at 2x and 5x ($W$ 0.69 to 0.83). For
+  Garage, this margin disappears at 10x.
+- Slow requests suffer much more than average ones. At 5x, the 99th percentile
+  latency is 3 to 10 times higher, and up to 45 times for Garage reads at 10x.
+
+The loss grows step by step with the slowdown. There is no sudden collapse.
+
+#figure(image("../figures/s2_factor.png", width: 100%),
+  caption: [S2: throughput compared with identical nodes, as one node gets slower.
+  Dashed lines: the two models (average node, weakest node).])<fig-s2>
+
+== S1: which resource matters most
+
+#figure(image("../figures/s1_resource.png", width: 100%),
+  caption: [S1: one resource of one node made 5 times slower.])<fig-s1>
+
+It depends on the system and on the operation (@fig-s1):
+
+- *Slow network* hurts all reads ($r$ 0.25 to 0.33): one third of the answers go
+  through the slow link.
+- *Slow disk* hurts all writes ($r$ 0.18 to 0.24) but not much the reads (MinIO 0.78,
+  the others 1.0). Recently written data is read from memory, so the slow disk is not
+  used (see Threats).
+- *Slow CPU* shows the biggest design differences. SeaweedFS reads do not notice it
+  (0.99) and Garage reads barely (0.86), but MinIO loses 70 % of its reads. This fits
+  erasure coding, where every node helps rebuild each object, but we did not profile
+  it. For writes, slow CPU hurts Garage most (0.26), probably because each node hashes
+  and checks every block it stores.
+
+== S3: losing the majority
+
+A second slow node (two out of three) changes almost nothing: $r$ moves by 0.11 at
+most (@fig-s3). With one slow node, the cluster already runs at the speed of that
+node, so a second one has little left to take. We expected a well designed system to
+avoid a single slow node while it still has a healthy majority. The sweeps do not
+show this, and the next section explains why.
+
+#figure(image("../figures/s3_nodes.png", width: 100%),
+  caption: [S3: number of slow nodes out of three, all resources, 5x.])<fig-s3>
+
+== S4: object size
+
+No object size makes the loss smaller (@fig-s4). Large objects (8 MiB) follow the
+weakest node on every system ($W$ 0.94 to 1.05). Small objects (16 KiB) are the worst
+case for MinIO reads and for SeaweedFS ($W$ 1.08 to 1.16, worse than the weakest node).
+SeaweedFS is designed for many small files, yet it loses 93 % of its small object
+writes. Only MinIO small writes lose less ($r$ 0.37).
+
+#figure(image("../figures/s4_size.png", width: 100%),
+  caption: [S4: object size at the reference point (one node, all resources, 5x).
+  Each ratio uses identical nodes at the same size.])<fig-s4>
+
+== Gateway effect
+
+// RESULTS: client on the two healthy nodes only.
+
+== Q2: node kill and rebuild
+
+// RESULTS: kill campaigns.
+
+= Threats to Validity
+
+*One machine.* All nodes share one machine and one disk. Our limits create the
+imbalance and we checked them, but other shared parts (memory bandwidth, the
+virtual machine) are not controlled.
+
+*Memory of the laptop.* The laptop has 8 GB and gives 6 GB to the virtual machine.
+macOS compressed or swapped part of that memory during the campaigns. This adds noise
+and can slow some runs. Random order spreads it over all conditions, so ratios are less
+affected than absolute numbers.
+
+*Page cache.* Recently written data is often read from memory, not from the slow
+disk. The 1 GB memory limit per node bounds this, but read results say more about CPU
+and network than about disks.
+
+*Slow disk model.* `io.max` caps throughput and IOPS but adds no fixed delay to each
+operation. A real hard disk needs about 13 ms for each random access (8.9 ms seek plus
+4.2 ms rotation for a WD Blue 7200 rpm, Showmetech) and manages about 75 to 130
+random IOPS (StorageReview). Our slow disk is closer to a busy SSD than to an old hard
+disk.
+
+*Different designs.* The systems protect data differently, and SeaweedFS elects a
+master leader (we record which node it is for each run). Our conclusions are about
+design choices in this setting, not a verdict on products.
+
+*Load generator.* We had to use an older warp, and the check with a second client is
+not conclusive for SeaweedFS.
+
+*End of rebuild.* "Done" means the bytes are back on the new node. It does not prove
+every internal structure is repaired. The final data check covers what users see.
+
+= Conclusion
+
+// RESULTS
+
+= References
+
+#set par(hanging-indent: 1.5em)
+
+Backblaze. _Backblaze Drive Stats for Q1 2026_.
+https://www.backblaze.com/blog/backblaze-drive-stats-for-q1-2026/
+
+Deuxfleurs. _Garage documentation: design goals and internals_. https://garagehq.deuxfleurs.fr
+
+Gunawi, H. S. et al. _Fail-Slow at Scale: Evidence of Hardware Performance Faults in Large
+Production Systems_. USENIX FAST, 2018.
+https://people.cs.vt.edu/huaicheng/s/fast18-failslow-slides.pdf
+
+abiosoft and contributors. _Colima: container runtimes on macOS with minimal setup_.
+https://github.com/abiosoft/colima
+
+Docker Inc. _Docker Engine and Docker Compose documentation_. https://docs.docker.com
+
+Linux kernel documentation. _Control Group v2_ (cpu.max, memory.max, io.max,
+memory.reclaim). https://docs.kernel.org/admin-guide/cgroup-v2.html
+
+Linux kernel documentation. _dm-delay_. https://docs.kernel.org/admin-guide/device-mapper/delay.html
+
+Linux kernel documentation. _Null block device driver_. https://docs.kernel.org/6.11/block/null_blk.html
+
+Oracle Linux blog. _Emulating disk latency with dm-delay_.
+https://blogs.oracle.com/linux/emulating-disk-latency-with-dm-delay
+
+Linux man pages. _tc-netem(8): network emulator_. https://man7.org/linux/man-pages/man8/tc-netem.8.html
+
+Axboe, J. _fio: flexible I/O tester_. https://github.com/axboe/fio
+
+King, C. I. _stress-ng_. https://github.com/ColinIanKing/stress-ng
+
+ESnet. _iperf3_. https://github.com/esnet/iperf
+
+Amazon Web Services. _boto3, AWS SDK for Python_. https://github.com/boto/boto3
+
+Astral. _uv: Python package and project manager_. https://github.com/astral-sh/uv
+
+Hunter, J. D. _Matplotlib: A 2D Graphics Environment_. Computing in Science and Engineering,
+9(3), 2007.
+
+Showmetech. _Review: HD 1TB Western Digital Blue WD10EZEX_ (8.9 ms average seek, 4.2 ms
+average latency, 150 MB/s). https://www.showmetech.com.br/review-hd-1tb-western-digital-blue-wd10ezex/
+
+StorageReview. _HGST Travelstar 7K1000 review_ (about 128 random 4K IOPS).
+https://www.storagereview.com/hgst_travelstar_7k1000_review
+
+StorageReview. _Seagate Barracuda 7200.8 review_ (69.8 MB/s outer, 39.9 MB/s inner zone).
+https://storagereview.com/review/seagate-barracuda-7200-8
+
+iXsystems. _WD Red SMR drive compatibility with ZFS_. https://www.truenas.com/docs/hardware/notices/wdsmr
+
+Storage Disk Prices. _SMR drive ZFS performance: why shingled drives destroy your pool_.
+https://storagediskprices.com/smr-drive-zfs-performance/
+
+Kleppmann, M., Riccomini, C. _Designing Data-Intensive Applications_. O'Reilly Media, 2026.
+
+MinIO. _MinIO object storage documentation: deployment architecture and erasure coding_.
+https://min.io/docs
+
+MinIO. _Warp: S3 benchmarking tool_. https://github.com/minio/warp
+
+SeaweedFS. _SeaweedFS documentation: architecture, replication and erasure coding_.
+https://github.com/seaweedfs/seaweedfs
