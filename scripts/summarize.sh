@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-# summarize.sh [--csv] run_dir...: runs summarize.py in the helper image
-# (it needs zstandard). Run directories must be under bench/results.
+# summarize.sh [--csv] run_dir...: runs summarize.py (it needs zstandard)
+# with uv on the host when available, otherwise in the helper image (run
+# directories must then be under bench/results).
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
+if command -v uv >/dev/null 2>&1; then
+  exec uv run --quiet --script "$BENCH_DIR/scripts/summarize.py" "$@"
+fi
 args=()
 for a in "$@"; do
   case "$a" in

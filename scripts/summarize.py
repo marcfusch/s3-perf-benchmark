@@ -1,4 +1,7 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# dependencies = ["zstandard"]
+# ///
 """Summarizes runs produced by run_warp.sh.
 
 For every run directory given, reads warp.csv.zst (one line per request) and
@@ -32,7 +35,8 @@ def ts(s):
     if "." in s:
         a, b = s.split(".")
         s = f"{a}.{b[:6]:0<6}"
-    return datetime.fromisoformat(s).timestamp()
+    # warp times are UTC, do not let the local time zone shift them
+    return datetime.fromisoformat(s + "+00:00").timestamp()
 
 
 def pct(v, p):
