@@ -52,6 +52,46 @@ during the rebuild?
 We never rank the systems. Each system is measured on identical nodes, then on
 degraded nodes, and we report how much it loses.
 
+= Background: Object Storage and S3
+
+*What object storage is.* A classic file system (ext4, NTFS, APFS) stores files in a
+tree of folders. A program can open a file, read a few bytes in the middle, change
+them, append, rename, lock. Object storage is simpler. It stores *objects*: a blob of
+bytes plus a little metadata, identified by a *key* (a name such as
+`photos/2026/cat.jpg`) inside a *bucket* (a top level container). There is no real
+folder tree: the slashes in a key are just characters. An object is written and read
+as a whole; to change one byte, you upload the whole object again.
+
+*The S3 API.* S3 is the object storage service of Amazon Web Services, and its HTTP
+interface became the common language of object storage (AWS, S3 API reference). The
+three systems we test all speak it. The main operations are:
+
+#figure(
+  table(
+    columns: (auto, auto, 1fr),
+    inset: 5pt,
+    align: (left, left, left),
+    table.header([*Operation*], [*HTTP request*], [*What it does*]),
+    [PUT], [`PUT /bucket/key`], [upload a whole object (a write)],
+    [GET], [`GET /bucket/key`], [download an object (a read)],
+    [HEAD (or STAT)], [`HEAD /bucket/key`], [get the size and metadata only],
+    [DELETE], [`DELETE /bucket/key`], [delete an object],
+    [LIST], [`GET /bucket?list-type=2`], [list the keys of a bucket],
+  ),
+  caption: [Main S3 operations],
+)
+
+Each request is signed with an access key and a secret key, so the server knows who
+sends it. Large objects can be uploaded in parts (multipart upload).
+
+*Why it fits a cluster.* Because objects are independent and written as a whole, a
+system can spread them over many machines and keep several copies, without the hard
+problems of a shared file system (locks, partial updates). Each node of the cluster
+can act as a *gateway*: it receives S3 requests, finds which nodes hold the object,
+and talks to them. Data is protected either by *replication* (several full copies on
+different nodes) or by *erasure coding* (the object is cut into data pieces plus
+parity pieces, so that any missing piece can be rebuilt from the others, like RAID).
+
 = Test Bench
 
 == Clusters
@@ -98,21 +138,29 @@ slower, it gets $1 slash k$ of the nominal resources, and what it loses is share
 between the healthy nodes. Only the split changes. (Delay is the exception: a slow
 node gets $k$ times the nominal delay.)
 
-This makes Q3 easy to read. Let $r$ be the throughput divided by the throughput on
-identical nodes. If the cluster ran at the speed of its average node, $r$ would stay
-at 1, since the total budget is the same. If it ran at the speed of its weakest node,
-$r$ would drop to $1 slash k$. We report
-$ W = (1 - r) / (1 - 1 slash k) $
-$W = 0$ means the cluster follows its average node. $W = 1$ means it follows its
-weakest node. $W > 1$ means it does even worse than its weakest node.
+This makes Q3 easy to read, with two numbers defined precisely in the Method
+section:
+
+- the *ratio* $r$: the throughput of the degraded cluster divided by the throughput
+  of the same cluster with identical nodes. $r = 1$ means no loss; $r = 0.25$ means the
+  cluster keeps a quarter of its throughput;
+- the *index* $W$, which tells which model the cluster follows.
+
+If the cluster ran at the speed of its *average* node, $r$ would stay at 1, since the
+total budget is the same. If it ran at the speed of its *weakest* node, $r$ would drop
+to $1 slash k$ (for example 0.2 when one node is 5 times slower). $W$ places the
+measured $r$ between these two cases.
 
 == Load and measurements
 
 The load comes from warp, an S3 benchmark tool (MinIO, warp). warp runs in its own
-container with 2 CPU, outside the cluster budget. It sends requests to the three
-nodes in turn (round robin), so the client never avoids a slow node: avoiding it is
-the job of the storage system. warp records every request: start, end, size, node
-and error.
+container with 2 CPU, outside the cluster budget. It keeps 8 requests in flight at
+all times (8 parallel workers) and sends them to the three nodes in turn: node 1,
+node 2, node 3, node 1, and so on. This is called *round robin*. It is what a simple
+setup does in practice, for example *DNS round robin*, where one name (such as
+`s3.home.lan`) points to the three addresses and each client picks the next one. The
+client therefore never avoids a slow node by itself. warp records every request:
+start, end, size, node and error.
 
 == Software stack
 
@@ -172,8 +220,12 @@ less than 5 % between runs, and the load was spread evenly over the nodes (withi
 flushed to disk. Longer write runs (60 s) reduce this.
 
 *Load generator.* warp is made by MinIO, one of the vendors we test, so we checked it
-instead of trusting it. *warp versions 1.1.0 to 1.3.1 send almost identical objects*:
-out of 60 objects written by v1.3.1, only 1 to 5 were different. Garage removes
+instead of trusting it. We read back the objects warp had written and compared their
+SHA256 hashes. *warp versions 1.1.0 to 1.3.1 send almost identical objects*: with 8
+workers, 60 objects written by versions 1.1.6 to 1.3.1 contained only 5 to 7 different
+ones, and with a single worker all 52 objects written by v1.3.1 were identical. So each worker sends the same bytes
+again and again. The random data generator itself did not change between v1.0.8 and
+v1.1.0, so the regression comes from another part of the code; we did not find which. Garage removes
 duplicate 1 MiB blocks, so it stored almost nothing and its writes looked twice as
 fast as they are (48.5 instead of 24.1 MiB/s). MinIO and SeaweedFS do not remove
 duplicates and were not affected. We use warp v1.0.8, which sends 100 different
@@ -208,38 +260,57 @@ slower, 1 MiB objects. Then we change one thing at a time:
   caption: [The four sweeps],
 )
 
-Each condition is measured for writes (PUT, 60 s) and reads (GET, 30 s on about
-200 MiB of objects), three times, in random order, each time on a new cluster. For S4
+Each condition is measured twice: once for writes and once for reads.
+
+- *Write run*: for 60 s, the client uploads new objects (PUT) as fast as the cluster
+  accepts them.
+- *Read run*: the client first uploads about 200 MiB of objects, then for 30 s
+  downloads them again and again (GET). Only those 30 s are measured.
+
+Writes get a longer run because some systems write in bursts (see SeaweedFS above).
+Each run is repeated three times, in random order, each time on a new cluster. For S4
 we also measure identical nodes at each object size, so we always compare the same
-size. We report medians.
+size.
 
 == How the numbers are computed
 
-*Throughput of one run.* warp records every request. We drop the first 3 s (warm
-up). For a run $i$, let $cal(R)_i$ be the successful requests of the measured operation
-that start after the warm up, $b_q$ the bytes of request $q$, and $Delta t_i$ the time
-from the end of the warm up to the end of the last request. Then
+*Throughput of one run ($T_i$).* $T_i$ is the average speed seen by the client during
+run $i$, in MiB/s: the amount of data successfully transferred, divided by the time
+it took. warp logs every request; we ignore the first 3 s (warm up) and failed
+requests. With $b_q$ the size of request $q$, $cal(R)_i$ the set of requests kept, and
+$Delta t_i$ the measured duration:
 $ T_i = (sum_(q in cal(R)_i) b_q) / (Delta t_i) $
-(in MiB/s; for a fixed object size this is proportional to the operations per second).
 
-*One condition.* A condition $c$ is a system, an operation (PUT or GET), an object
-size, a degradation (resource, factor $k$, number of slow nodes) and the set of nodes
-the client talks to. It is run 3 times, and we keep the median:
+*One condition ($T(c)$).* A condition $c$ fixes everything we control: system,
+operation (PUT or GET), object size, which resource is slowed down, by how much, on
+how many nodes, and which nodes the client talks to. It is run 3 times, and we keep
+the middle value (the median), which ignores one unusually fast or slow run:
 $ T(c) = "median"(T_1, T_2, T_3) $
 
-*Ratio.* Let $c_0$ be the same condition with identical nodes: same system, same
-operation, same size, *same client nodes*, only the degradation removed. Then
+*Ratio ($r$).* $c_0$ is the same condition with identical nodes: everything equal,
+only the slowdown removed. The ratio is the share of throughput the cluster keeps:
 $ r(c) = T(c) / T(c_0) $
-$r = 1$ means no loss, $r = 0.25$ means the cluster keeps a quarter of its throughput.
-Because the total budget is constant, $r$ can be above 1: the healthy nodes have
-more resources than in the homogeneous cluster.
+For example, $r = 0.33$ means the cluster keeps a third of its speed. Because the total
+budget is constant, $r$ can be above 1: the healthy nodes have more resources than in
+the homogeneous cluster.
 
-*Index for Q3.*
-$ W(c) = (1 - r(c)) / (1 - 1 slash k) $
-$W = 0$: the cluster follows its average node. $W = 1$: it follows its weakest node.
+*Slowdown factor ($k$, written 2x, 5x, 10x).* The slow node gets $1 slash k$ of the
+nominal CPU, disk and network: at 5x it has 0.2 CPU, 5 MiB/s of disk reads, 200 Mbit/s
+of network, and 5 ms of delay instead of 1 ms.
 
-*Latency.* Percentiles (p50, p99) are taken over all the requests of the run, then the
-median over the 3 runs is kept, like throughput.
+*Index ($W$).* $W$ answers Q3 with one number: where does $r$ sit between "follows
+the average node" ($r = 1$) and "follows the weakest node" ($r = 1 slash k$)?
+$ W = (1 - r) / (1 - 1 slash k) $
+$W = 0$: no loss, the cluster follows its average node. $W = 1$: the cluster is as slow
+as its weakest node. $W$ between 0 and 1: in between. $W > 1$: even slower than its
+weakest node. Example: at 5x, $r = 0.33$ gives $W = 0.67 slash 0.8 = 0.84$.
+
+*Latency percentiles (p50, p99).* The latency of a request is the time between sending
+it and receiving the full answer. Sort the latencies of all requests of a run: the
+*p50* (median) is the value in the middle, so half of the requests were faster; the
+*p99* is the value below which 99 % of the requests fall, so it describes the slowest
+1 % (the "tail"). Users notice the tail: one page that loads slowly is enough. As for
+throughput, we keep the median of the 3 runs.
 
 == Node kill campaigns
 
@@ -282,7 +353,7 @@ median throughput of a condition divided by the median throughput on identical n
     columns: (auto, auto, auto, auto, auto),
     inset: 5pt,
     align: (left, right, right, right, right),
-    table.header([*System, op*], [*Identical nodes*], [*$r$ at 2x*], [*$r$ at 5x*], [*$r$ at 10x*]),
+    table.header([*System, op*], [*Identical nodes $T(c_0)$*], [*$r$, node 2x slower*], [*$r$, 5x slower*], [*$r$, 10x slower*]),
     [Garage PUT], [36 MiB/s], [0.58], [0.39], [0.09],
     [Garage GET], [205 MiB/s], [0.77], [0.33], [0.07],
     [MinIO PUT], [71 MiB/s], [0.49], [0.18], [0.09],
@@ -296,8 +367,9 @@ median throughput of a condition divided by the median throughput on identical n
 
 == Q1 and Q3: the cluster follows its weakest node
 
-With one node 5 times slower, every system loses 61 to 82 % of its throughput
-(@tab-s2, @fig-s2), even though the cluster has the same total resources. A cluster
+@tab-s2 gives the ratio $r$ of each system when one node is 2, 5 or 10 times slower,
+and @fig-s2 plots it. With one node 5 times slower, every system loses 61 to 82 % of
+its throughput, even though the cluster has the same total resources. A cluster
 that followed its average node would lose nothing. One that followed its weakest node
 would lose 80 %. Our results are close to the second case: $W$ is 0.76 to 1.02 at 5x,
 and 0.89 to 1.03 at 10x.
@@ -357,8 +429,8 @@ writes. Only MinIO small writes lose less ($r$ 0.37).
 
 == Gateway effect
 
-In the sweeps the client sends one third of its requests to the slow node, as it
-would through a simple DNS round robin. The slow node then answers slowly no matter
+In the sweeps the client sends one third of its requests to the slow node (round
+robin, see Load and measurements). The slow node then answers slowly no matter
 what the storage system does inside. To separate the two effects, we ran S2 again
 with a client that only talks to the two healthy nodes. Its reference $c_0$ is
 also measured with the client on the two healthy nodes, so the ratio only
@@ -439,6 +511,9 @@ every internal structure is repaired. The final data check covers what users see
 = References
 
 #set par(hanging-indent: 1.5em)
+
+Amazon Web Services. _Amazon S3 API Reference_.
+https://docs.aws.amazon.com/AmazonS3/latest/API/Welcome.html
 
 Backblaze. _Backblaze Drive Stats for Q1 2026_.
 https://www.backblaze.com/blog/backblaze-drive-stats-for-q1-2026/
