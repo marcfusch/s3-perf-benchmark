@@ -36,6 +36,11 @@ Then `scripts/build.sh` once.
 | `calibrate_limits.sh` | checks the limits with fio, stress-ng, iperf3 and ping on probe containers |
 | `reference.sh` | homogeneous reference, repeated, random order: noise and homogeneity |
 | `validate_loadgen.sh` | data uniqueness, cross check with a second client, client headroom |
+| `sweep.sh <dir> S1 S2 S3 S4` | the declared sweeps around the reference point, random order, resumable |
+| `kills.sh <dir>` / `kill_campaign.sh` | node kill campaigns: preload, kill, data check, replacement, rebuild, final check |
+| `queue.sh <file>` | runs a list of campaigns one after the other (never two at once), resumable |
+| `sweep_report.py`, `kill_report.py`, `figures.py` | ratios, W index, rebuild phases, figures (run with `uv run --script`) |
+| `host_monitor.sh` | macOS only: logs host swap and VM memory, to spot runs hit by swapping |
 
 Status and results of the first two phases: [PHASE1-2.md](PHASE1-2.md).
 

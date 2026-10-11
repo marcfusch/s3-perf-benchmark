@@ -1,0 +1,4 @@
+# VM restarted with 4 GB (was 6 GB) to limit macOS swapping
+scripts/kills.sh results/kills-1
+CLIENT_NODES='2 3' scripts/sweep.sh results/sweep-gw GW
+scripts/sweep.sh results/sweep-chk CHK

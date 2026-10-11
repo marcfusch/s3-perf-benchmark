@@ -18,11 +18,13 @@ s3_port() {
   esac
 }
 
-# Comma separated list of the three S3 endpoints, the client spreads its
-# requests over them.
+# Comma separated list of the S3 endpoints the client spreads its requests
+# over: the three nodes, or only those listed in CLIENT_NODES (e.g. "2 3"
+# to keep the client away from a degraded node1).
 s3_hosts() {
-  local p; p=$(s3_port "$1") || return 1
-  echo "$1-node1:$p,$1-node2:$p,$1-node3:$p"
+  local p n out=""; p=$(s3_port "$1") || return 1
+  for n in ${CLIENT_NODES:-1 2 3}; do out="$out$1-node$n:$p,"; done
+  echo "${out%,}"
 }
 
 # Runs a command in the helper image with access to the VM cgroups and pids.
