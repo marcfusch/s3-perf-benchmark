@@ -11,8 +11,9 @@ phases from events.json:
   degraded  kill .. degraded check (node dead, nothing replaced yet)
   rebuild   replacement done .. rebuild detected
   after     rebuild detected .. load end
-Per phase: median per second throughput, p50/p99 latency, errors, and the
-throughput ratio to "before". Also: rebuild duration (replacement to
+Per phase: median and mean per second throughput, the longest stall (run of
+seconds without a single answer), p50/p99 latency, errors, and the
+throughput ratios to "before". Also: rebuild duration (replacement to
 detection), rebuild rate (bytes on the new node / duration), and the two
 data checks (degraded, final).
 
@@ -75,7 +76,10 @@ def analyse(run):
         else:
             bins[sec][0] += b
     covered = lambda sec: any(w0 <= sec and sec + 1 <= w1 for w0, w1 in windows)
-    timeline = [(sec, bins[sec][0] / 2**20, bins[sec][1]) for sec in sorted(bins) if covered(sec)]
+    # every second during which a slice was running counts, including the
+    # seconds where no request finished at all (a stalled cluster is 0 MiB/s)
+    secs = sorted({sec for w0, w1 in windows for sec in range(int(w0), int(w1) + 1) if covered(sec)})
+    timeline = [(sec, bins[sec][0] / 2**20, bins[sec][1]) if sec in bins else (sec, 0.0, 0) for sec in secs]
     with open(os.path.join(run, "timeline.csv"), "w") as f:
         f.write("t,mib_s,errors\n")
         for sec, m, e in timeline:
@@ -93,14 +97,23 @@ def analyse(run):
             out[name] = None
             continue
         thr = [m for sec, m, e in timeline if w[0] <= sec and sec + 1 <= w[1]]
+        # longest run of consecutive seconds without a single answer
+        stall = streak = 0
+        for m in thr:
+            streak = streak + 1 if m == 0 else 0
+            stall = max(stall, streak)
         lat = [lat for s, e, b, lat, err in reqs if w[0] <= s < w[1] and not err]
         errs = sum(1 for s, e, b, lat, err in reqs if w[0] <= s < w[1] and err)
         out[name] = {"seconds": round(w[1] - w[0]), "mib_s": statistics.median(thr) if thr else None,
+                     "mean_mib_s": statistics.fmean(thr) if thr else None, "stall_s": stall,
                      "p50_ms": pct(lat, 50), "p99_ms": pct(lat, 99), "errors": errs}
     base = out["before"]["mib_s"]
+    base_mean = out["before"]["mean_mib_s"]
     for name, v in out.items():
         if v and v["mib_s"] is not None and base:
             v["ratio"] = v["mib_s"] / base
+        if v and v["mean_mib_s"] is not None and base_mean:
+            v["mean_ratio"] = v["mean_mib_s"] / base_mean
 
     victim = ev["victim"]
     reb = list(csv.DictReader(open(os.path.join(run, "rebuild.csv"))))
@@ -131,6 +144,8 @@ def main():
             "victim": f"node{a['victim']}" + (" (weak)" if a["victim"] <= a["n_degraded"] else ""),
             "before_mib_s": round(f("before", "mib_s") or 0, 1),
             "degraded_ratio": round(f("degraded", "ratio") or 0, 2),
+            "degraded_mean_ratio": round(f("degraded", "mean_ratio") or 0, 2),
+            "stall_after_kill_s": f("degraded", "stall_s"),
             "rebuild_ratio": round(f("rebuild", "ratio") or 0, 2),
             "after_ratio": round(f("after", "ratio") or 0, 2),
             "rebuild_p99_ms": round(f("rebuild", "p99_ms") or 0, 1),

@@ -19,6 +19,11 @@ g layout remove "$old" >/dev/null
 g layout assign -z "dc$n" -c 4G "${new:0:16}" >/dev/null
 v=$(g layout show | sed -n 's/.*Current cluster layout version: \([0-9]*\).*/\1/p')
 g layout apply --version $((v + 1)) >/dev/null
+# a new node starts with the default resync settings
+if [ -n "${GARAGE_RESYNC:-}" ]; then
+  g worker set -a resync-worker-count "${GARAGE_RESYNC%,*}" >/dev/null
+  g worker set -a resync-tranquility "${GARAGE_RESYNC#*,}" >/dev/null
+fi
 sleep 2
 g layout skip-dead-nodes --version $((v + 1)) >/dev/null
 echo "garage: node $n replaced, $old -> ${new:0:16}, layout v$((v + 1))"

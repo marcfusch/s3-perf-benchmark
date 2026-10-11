@@ -22,5 +22,12 @@ g key allow --create-bucket "$S3_ACCESS_KEY" >/dev/null
 # cluster, its first uploads may not see it yet ("Bucket not found")
 g bucket create bench >/dev/null
 g bucket allow --read --write --owner bench --key "$S3_ACCESS_KEY" >/dev/null
+# optional tuning of the block resync (rebuild) speed, e.g. GARAGE_RESYNC=4,0:
+# number of resync workers (default 1, max 8) and tranquility (default 2: the
+# worker sleeps twice the time it worked, to protect client traffic)
+if [ -n "${GARAGE_RESYNC:-}" ]; then
+  g worker set -a resync-worker-count "${GARAGE_RESYNC%,*}" >/dev/null
+  g worker set -a resync-tranquility "${GARAGE_RESYNC#*,}" >/dev/null
+fi
 sleep 2
 g status
