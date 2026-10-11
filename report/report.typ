@@ -213,6 +213,34 @@ Each condition is measured for writes (PUT, 60 s) and reads (GET, 30 s on about
 we also measure identical nodes at each object size, so we always compare the same
 size. We report medians.
 
+== How the numbers are computed
+
+*Throughput of one run.* warp records every request. We drop the first 3 s (warm
+up). For a run $i$, let $cal(R)_i$ be the successful requests of the measured operation
+that start after the warm up, $b_q$ the bytes of request $q$, and $Delta t_i$ the time
+from the end of the warm up to the end of the last request. Then
+$ T_i = (sum_(q in cal(R)_i) b_q) / (Delta t_i) $
+(in MiB/s; for a fixed object size this is proportional to the operations per second).
+
+*One condition.* A condition $c$ is a system, an operation (PUT or GET), an object
+size, a degradation (resource, factor $k$, number of slow nodes) and the set of nodes
+the client talks to. It is run 3 times, and we keep the median:
+$ T(c) = "median"(T_1, T_2, T_3) $
+
+*Ratio.* Let $c_0$ be the same condition with identical nodes: same system, same
+operation, same size, *same client nodes*, only the degradation removed. Then
+$ r(c) = T(c) / T(c_0) $
+$r = 1$ means no loss, $r = 0.25$ means the cluster keeps a quarter of its throughput.
+Because the total budget is constant, $r$ can be above 1: the healthy nodes have
+more resources than in the homogeneous cluster.
+
+*Index for Q3.*
+$ W(c) = (1 - r(c)) / (1 - 1 slash k) $
+$W = 0$: the cluster follows its average node. $W = 1$: it follows its weakest node.
+
+*Latency.* Percentiles (p50, p99) are taken over all the requests of the run, then the
+median over the 3 runs is kept, like throughput.
+
 == Node kill campaigns
 
 Each campaign follows these steps:
@@ -329,7 +357,43 @@ writes. Only MinIO small writes lose less ($r$ 0.37).
 
 == Gateway effect
 
-// RESULTS: client on the two healthy nodes only.
+In the sweeps the client sends one third of its requests to the slow node, as it
+would through a simple DNS round robin. The slow node then answers slowly no matter
+what the storage system does inside. To separate the two effects, we ran S2 again
+with a client that only talks to the two healthy nodes. Its reference $c_0$ is
+also measured with the client on the two healthy nodes, so the ratio only
+measures what the slow node costs *inside* the cluster.
+
+#figure(image("../figures/gateway.png", width: 100%),
+  caption: [S2 with the client on all three nodes (dotted) and on the two healthy
+  nodes only (solid).])<fig-gw>
+
+#figure(
+  table(
+    columns: (auto, auto, auto, auto),
+    inset: 5pt,
+    align: (left, right, right, right),
+    table.header([*$r$, all nodes → healthy nodes*], [*2x*], [*5x*], [*10x*]),
+    [Garage GET], [0.77 → 1.19], [0.33 → 1.12], [0.07 → 1.25],
+    [SeaweedFS GET], [0.62 → 1.03], [0.26 → 0.48], [0.13 → 0.24],
+    [MinIO GET], [0.66 → 0.99], [0.24 → 0.41], [0.11 → 0.16],
+    [Writes, all systems ($W$)], [0.70 to 1.03], [0.85 to 1.01], [0.85 to 1.00],
+  ),
+  caption: [Ratio $r$ with the client on all nodes, then on the healthy nodes only.],
+)<tab-gw>
+
+- *Garage reads* get *faster* than on identical nodes ($r$ 1.12 to 1.25) once the
+  client avoids the slow node. Garage reads from the healthy nodes, which received the
+  budget of the slow one. All of its read loss in the sweeps came from the gateway.
+- *MinIO and SeaweedFS reads* recover at 2x, but still lose at 5x and 10x ($W$ 0.66
+  to 0.93): their read path still waits for the slow node. For MinIO this fits erasure
+  coding, where 2 of the 3 shards are needed to rebuild an object.
+- *Writes* follow the weakest node on all systems, with or without the slow gateway.
+  Every write must reach the nodes that store the copies, including the slow one.
+
+So the answer to Q3 depends on the operation: writes follow the weakest node; reads
+follow it too unless the client avoids the slow node, and then only Garage really
+escapes it.
 
 == Q2: node kill and rebuild
 
@@ -341,10 +405,12 @@ writes. Only MinIO small writes lose less ($r$ 0.37).
 imbalance and we checked them, but other shared parts (memory bandwidth, the
 virtual machine) are not controlled.
 
-*Memory of the laptop.* The laptop has 8 GB and gives 6 GB to the virtual machine.
-macOS compressed or swapped part of that memory during the campaigns. This adds noise
-and can slow some runs. Random order spreads it over all conditions, so ratios are less
-affected than absolute numbers.
+*Memory of the laptop.* The laptop has 8 GB and gave 6 GB to the virtual machine for
+the main sweeps. macOS compressed or swapped part of that memory, which adds noise.
+We then reduced the virtual machine to 4 GB (swap reads dropped from about 1700 to
+under 100 per minute) and ran the homogeneous reference and the reference point
+again. Throughput moved by 10 % at most and the ratios by 0.06 at most, so the
+conclusions hold. Random order also spreads such noise over all conditions.
 
 *Page cache.* Recently written data is often read from memory, not from the slow
 disk. The 1 GB memory limit per node bounds this, but read results say more about CPU

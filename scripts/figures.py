@@ -201,7 +201,10 @@ def gateway_figure(sweep_dir, gw_dir, out):
     fig, axes = plt.subplots(1, 2, figsize=(7.2, 3.0), sharey=True)
     for ax, op in zip(axes, ["PUT", "GET"]):
         ax.plot(xs, [1 / k for k in xs], ls="--", lw=1, color=REF, zorder=1)
+        ax.plot(xs, [1.0] * len(xs), ls="--", lw=1, color=REF, zorder=1)
         ax.annotate("follows weakest", (xs[-1], 0.1), xytext=(4, 0), textcoords="offset points",
+                    color=INK2, fontsize=7, va="center")
+        ax.annotate("follows average", (xs[-1], 1.0), xytext=(4, 0), textcoords="offset points",
                     color=INK2, fontsize=7, va="center")
         for s in SYSTEMS:
             for rows, ls, lab in ((allr, ":", "via weak node too"), (gw, "-", "healthy gateways")):
@@ -215,7 +218,7 @@ def gateway_figure(sweep_dir, gw_dir, out):
         ax.set_xticks(xs)
         ax.set_xlabel("slowdown factor of one node (all resources)")
     axes[0].set_ylabel("throughput / homogeneous")
-    axes[0].set_ylim(0, 1.15)
+    axes[0].set_ylim(0, 1.4)
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=3, fontsize=7)
     fig.suptitle("Gateway effect: solid, the client avoids the weak node; dotted, it uses it",
