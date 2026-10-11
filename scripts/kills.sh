@@ -11,9 +11,11 @@ REPS=${REPS:-2}
 SYSTEMS=${SYSTEMS:-"garage minio seaweedfs"}
 mkdir -p "$out"; out=$(cd "$out" && pwd)
 plan="$out/plan.txt"
+# SCENARIOS: "resource factor n_degraded victim" separated by commas
+SCENARIOS=${SCENARIOS:-"none 1 0 3,all 5 1 1,all 5 1 3"}
 if [ ! -s "$plan" ]; then
   for s in $SYSTEMS; do for r in $(seq 1 "$REPS"); do
-    echo "$s none 1 0 3 $r"; echo "$s all 5 1 1 $r"; echo "$s all 5 1 3 $r"
+    echo "$SCENARIOS" | tr ',' '\n' | while read -r sc; do echo "$s $sc $r"; done
   done; done | python3 -c 'import random,sys; l=sys.stdin.readlines(); random.seed(872); random.shuffle(l); print("".join(l), end="")' > "$plan"
 fi
 while read -r s res k nd victim r; do

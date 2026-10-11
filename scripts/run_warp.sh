@@ -9,7 +9,7 @@ source "$(dirname "$0")/lib.sh"
 sys=$1 run_dir=$2 op=$3; shift 3
 mkdir -p "$run_dir"; run_dir=$(cd "$run_dir" && pwd)
 
-docker rm -f warp-client sampler >/dev/null 2>&1 || true
+docker rm -f warp-client sampler reclaimer >/dev/null 2>&1 || true
 started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 # roundrobin on purpose: a client that routes around slow hosts ("weighed")
@@ -31,6 +31,15 @@ docker run -d --name sampler --privileged --pid=host --cgroupns=host \
   python3 /usr/local/bin/sample.py --out /out/resources.csv --dev "$(disk_dev)" \
   --interval "${SAMPLE_INTERVAL:-1}" "${targets[@]}" >/dev/null
 
+# RECLAIM=1: every second, ask the kernel to drop the page cache of each node
+# (cgroup v2 memory.reclaim), so reads really reach the (slow) disk instead
+# of memory, without needing a data set larger than the RAM
+if [ "${RECLAIM:-0}" = 1 ]; then
+  cgs=""; for c in "$sys-node1" "$sys-node2" "$sys-node3"; do cgs="$cgs $(cgroup_of "$c")"; done
+  docker run -d --name reclaimer --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup \
+    "$TOOLS_IMAGE" sh -c "while true; do for c in $cgs; do echo 1G > /sys/fs/cgroup\$c/memory.reclaim 2>/dev/null; done; sleep 1; done" >/dev/null
+fi
+
 leader=""
 if [ "$sys" = seaweedfs ]; then
   leader=$(docker exec seaweedfs-node1 wget -qO- http://localhost:9333/cluster/status 2>/dev/null | sed -n 's/.*"Leader":"\([^"]*\)".*/\1/p' || true)
@@ -39,12 +48,14 @@ fi
 rc=$(docker wait warp-client)
 docker logs warp-client > "$run_dir/warp.txt" 2>&1
 docker stop -t 5 sampler >/dev/null; docker rm sampler warp-client >/dev/null
+docker rm -f reclaimer >/dev/null 2>&1 || true
 
 images=$(docker inspect -f '{{.Config.Image}}' "$sys-node1")
 cat > "$run_dir/meta.json" <<JSON
 {"system":"$sys","op":"$op","started":"$started","warp_rc":$rc,
  "image":"$images","warp_image":"$WARP_IMAGE","client_cpus":$CLIENT_CPUS,
- "seaweedfs_master_leader":"$leader","warp_args":"$*"}
+ "seaweedfs_master_leader":"$leader","reclaim":${RECLAIM:-0},"hdd_nodes":"${HDD_NODES:-}",
+ "client_nodes":"${CLIENT_NODES:-1 2 3}","warp_args":"$*"}
 JSON
 [ "$rc" = 0 ] || { log "warp exited with $rc, see $run_dir/warp.txt"; exit "$rc"; }
 log "run done: $run_dir"

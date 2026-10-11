@@ -2,3 +2,6 @@
 scripts/kills.sh results/kills-1
 CLIENT_NODES='2 3' scripts/sweep.sh results/sweep-gw GW
 scripts/sweep.sh results/sweep-chk CHK
+# modelled hard disk on node1 (scripts/hdd.sh), reads with page cache dropped
+RECLAIM_GET=1 scripts/sweep.sh results/sweep-hdd HDD
+RECLAIM=1 SCENARIOS='none 1 0 3,hdd 1 1 3' scripts/kills.sh results/kills-hdd

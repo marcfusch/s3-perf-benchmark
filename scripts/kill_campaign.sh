@@ -13,6 +13,9 @@
 #      done when the new node holds at least 95 % of the bytes of the median
 #      survivor (polled every 5 s, given up after REBUILD_TIMEOUT s);
 #   6. AFTER s more of load, then a final check of every object.
+# Resource "hdd": node1 gets a modelled hard disk (scripts/hdd.sh), other
+# limits nominal. RECLAIM=1: the page cache of every container is dropped
+# every second, so reads reach the disks.
 # Output: events.json (timeline, checks), chunks/*.csv.zst (every request),
 # rebuild.csv (bytes per node over time), resources-*.csv, limits.json.
 set -euo pipefail
@@ -66,8 +69,9 @@ load_loop() {
   done
 }
 
-docker rm -f sampler warp-chunk >/dev/null 2>&1 || true
+docker rm -f sampler warp-chunk reclaimer >/dev/null 2>&1 || true
 rm -f "$run/.stop"
+export HDD_NODES=""; [ "$res" = hdd ] && HDD_NODES=1
 "$BENCH_DIR/scripts/up.sh" "$sys" > "$run/up.log" 2>&1
 "$BENCH_DIR/scripts/limits.sh" "$sys" "$res" "$k" "$nd" > "$run/limits.json"
 leader=""
@@ -81,6 +85,10 @@ fi
 ev preload "$pre"
 
 start_sampler a
+if [ "${RECLAIM:-0}" = 1 ]; then
+  docker run -d --name reclaimer --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup \
+    "$TOOLS_IMAGE" sh -c 'while true; do for f in $(find /sys/fs/cgroup -path "*docker*" -name memory.reclaim); do echo 1G > $f 2>/dev/null; done; sleep 1; done' >/dev/null
+fi
 load_loop & loop_pid=$!
 ev t_load_start "$(now)"
 sleep "$WARM"
@@ -127,13 +135,14 @@ sleep "$AFTER"
 touch "$run/.stop"; wait "$loop_pid" || true
 ev t_load_end "$(now)"
 stop_sampler
+docker rm -f reclaimer >/dev/null 2>&1 || true
 ev check_final "$(check)"
 {
   echo "{"
   cat "$run/.events"
   echo "\"system\": \"$sys\", \"resource\": \"$res\", \"factor\": $k, \"n_degraded\": $nd,"
   echo "\"victim\": $victim, \"client_hosts\": \"$hosts\", \"seaweedfs_master_leader\": \"$leader\","
-  echo "\"warp_image\": \"$WARP_IMAGE\", \"rebuilt\": $rebuilt}"
+  echo "\"warp_image\": \"$WARP_IMAGE\", \"reclaim\": ${RECLAIM:-0}, \"hdd_nodes\": \"$HDD_NODES\", \"rebuilt\": $rebuilt}"
 } > "$run/events.json"
 rm -f "$run/.events" "$run/.stop"
 python3 -c "import json; json.load(open('$run/events.json'))" && log "$sys: campaign done: $run"
