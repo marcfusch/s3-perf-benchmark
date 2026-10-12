@@ -583,6 +583,11 @@ requests were in flight at that moment, so it varies between repetitions. It hap
 on all three systems, most often when a *healthy* node died next to a slow one (4 of
 6 campaigns).
 
+Garage was killed 18 times in total (the 6 campaigns above, plus 12 more for the
+rebuild tests below, which are identical until the replacement). The freeze clearly
+depends on which node dies: Garage froze in 9 of the 12 campaigns where node 3 died
+(60 to 118 s), and in none of the 6 where node 1 died. We did not find why.
+
 *Rebuild time differs by a factor of 10.* MinIO and SeaweedFS rebuild 500 MiB in
 about one minute. Garage takes about 11 minutes. Looking at the bytes on the new node
 over time explains why: for about 10 minutes nothing arrives, then everything is copied
@@ -591,11 +596,18 @@ metadata tables run a full synchronisation, which happens every 10 minutes for t
 split between nodes (`ANTI_ENTROPY_INTERVAL`, Garage source code, `sharded.rs`). The
 rebuild speed settings do not help: with 4 resync workers instead of 1 and no pause
 between blocks (default: the worker sleeps twice as long as it works, `resync.rs`),
-the rebuild still took 616 to 672 s. The client does not notice the Garage rebuild at
-all (0.93 to 1.03), while MinIO and SeaweedFS lose up to 19 % and 12 % of their read
-speed during their faster rebuild.
-
-// RESULTS: Garage with an immediate `garage repair tables` after the replacement.
+the rebuild still took 616 to 672 s, with nothing copied before the next round. An
+operator can ask for this synchronisation at once (`garage repair tables`, then
+`garage repair blocks`). We tried it in 6 campaigns: in 3 of them, 90 % of the data
+was back within 59 to 95 s, but in the other 3 nothing happened before the usual
+10 minutes, and even in the best case the last blocks could wait for the next round
+(59 s for 90 %, 615 s for everything). We suspect the repair sometimes starts before
+the new node has accepted the new cluster layout, but we did not check it. With the
+default settings the client does not notice the Garage rebuild at all (0.93 to 1.03);
+when the repair made it fast, the client lost up to 32 % during it (0.68). MinIO and
+SeaweedFS lose up to 19 % and 12 % of their read speed during their fast rebuild. A
+fast rebuild is paid by the users; a slow one leaves the data with one copy less for
+longer.
 
 *Losing the slow node makes the cluster faster.* When the slow node dies, MinIO and
 SeaweedFS read 1.7 to 3.5 times faster than before, while the node is dead
