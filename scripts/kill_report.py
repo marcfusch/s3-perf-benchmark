@@ -128,12 +128,20 @@ def analyse(run):
     victim = ev["victim"]
     reb = list(csv.DictReader(open(os.path.join(run, "rebuild.csv"))))
     new_bytes = int(reb[-1][f"node{victim}"]) if reb else 0
+    # time until the new node holds 90 % of the bytes of the median survivor:
+    # with Garage most blocks can come back long before the last ones
+    t90 = None
+    for x in reb:
+        others = sorted(int(x[f"node{i}"]) for i in (1, 2, 3) if i != victim)
+        if others and int(x[f"node{victim}"]) >= 0.9 * others[len(others) // 2]:
+            t90 = float(x["t"]) - ev["t_replace"]
+            break
     duration = rebuilt - ev["t_replace"] if rebuilt else None
     return {"run": os.path.basename(run), "system": ev["system"], "resource": ev["resource"],
             "factor": ev["factor"], "n_degraded": ev["n_degraded"], "victim": victim,
             "leader": ev.get("seaweedfs_master_leader", ""),
             "rebuild_s": duration, "rebuild_mib_s": new_bytes / 2**20 / duration if duration else None,
-            "stall_while_dead_s": stall_dead,
+            "stall_while_dead_s": stall_dead, "rebuild90_s": t90,
             "check_degraded": ev["check_degraded"], "check_final": ev["check_final"], "phases": out}
 
 
@@ -162,6 +170,7 @@ def main():
             "rebuild_p99_ms": round(f("rebuild", "p99_ms") or 0, 1),
             "before_p99_ms": round(f("before", "p99_ms") or 0, 1),
             "errors": sum((p[ph] or {}).get("errors", 0) for ph in p),
+            "rebuild90_s": None if a["rebuild90_s"] is None else round(a["rebuild90_s"]),
             "rebuild_s": None if a["rebuild_s"] is None else round(a["rebuild_s"]),
             "rebuild_mib_s": None if a["rebuild_mib_s"] is None else round(a["rebuild_mib_s"], 1),
             "readable_degraded": f"{cd.get('ok', '?')}/{cd.get('objects', '?')}",
