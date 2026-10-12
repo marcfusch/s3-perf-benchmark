@@ -3,3 +3,4 @@ images/tools/*.py
 queues/*.done
 report/*.pdf
 scripts/*.tmp
+.DS_Store
