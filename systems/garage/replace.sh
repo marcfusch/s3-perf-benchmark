@@ -26,4 +26,12 @@ if [ -n "${GARAGE_RESYNC:-}" ]; then
 fi
 sleep 2
 g layout skip-dead-nodes --version $((v + 1)) >/dev/null
+# optional: start a full sync now instead of waiting for the next anti
+# entropy round (every 10 minutes for sharded tables, src/table/replication/
+# sharded.rs), which is what delays the rebuild by up to 10 minutes
+if [ "${GARAGE_REPAIR:-0}" = 1 ]; then
+  sleep 5
+  g repair -a --yes tables >/dev/null
+  g repair -a --yes blocks >/dev/null
+fi
 echo "garage: node $n replaced, $old -> ${new:0:16}, layout v$((v + 1))"

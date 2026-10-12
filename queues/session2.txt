@@ -12,3 +12,7 @@ SYSTEMS=garage GARAGE_RESYNC=4,0 scripts/sweep.sh results/sweep-garage-tuned S2
 RECLAIM_GET=1 scripts/sweep.sh results/sweep-hddfs FS
 # more repetitions of the scenario that froze most often, to estimate how often it happens
 REPS=4 SCENARIOS='all 5 1 3' scripts/kills.sh results/kills-stall
+# Garage rebuild waits for the 10 min anti entropy round: operator triggers repair right away
+SYSTEMS=garage GARAGE_REPAIR=1 scripts/kills.sh results/kills-garage-repair
+# more repetitions of the scenario that froze most often (moved after the repair test)
+REPS=3 SCENARIOS='all 5 1 3' scripts/kills.sh results/kills-stall
