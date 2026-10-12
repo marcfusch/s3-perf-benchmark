@@ -8,11 +8,11 @@
     #context [ Page #counter(page).display() #h(1fr) ]
   ]
 )
-#set heading(numbering: "1.1.1.1")
+#set heading(numbering: "1.1.1.1)")
 #set par(justify: true)
 #linebreak() #linebreak() #linebreak() #linebreak()
 #align(center)[
-  #set text(26pt)
+  #set text(20pt)
   #title("Distributed Object Storage on Bad Hardware")
 ]
 
@@ -30,18 +30,19 @@
 
 = Summary
 
-Small clusters are often built from mismatched machines. We measured how three S3
+Small clusters are often built from mismatched machines and/or relatively inexpensive hardware. We measured how three S3
 systems, Garage, MinIO and SeaweedFS, behave when one of three nodes is slower than the
 others, on a bench where the total resources of the cluster never change and only
 their split between nodes does.
 
+What we found:
 - *The cluster follows its weakest node.* With one node five times slower, every
   system loses 61 to 82 % of its throughput, close to what the slowest node alone
-  would allow. Writes always pay for the slow node. Reads escape it only on Garage, and
+  would allow. Writes always pay for the slow node. Reads are only unaffected using Garage, and
   only if the client does not send requests through the slow node.
 - *An old hard disk kills small file reads.* With a modelled consumer hard disk on one
   node, small object reads drop to 3 % (MinIO) to 23 % (SeaweedFS) of their speed,
-  while writes are barely affected, except on MinIO.
+  while writes are barely affected, except on MinIO. This is to be expected of an HDD, whose head has to physically move to each piece of data.
 - *A dead node loses no data but can freeze the service.* In 51 node kill campaigns,
   no object was ever lost, but the service often froze for 20 to 118 s. MinIO and
   SeaweedFS rebuild 500 MiB in about a minute; Garage waits about 10 minutes for its
@@ -56,7 +57,9 @@ fast NVMe box next to an old laptop with a spinning disk and a weak link. Disks 
 fail often enough that every cluster goes through rebuilds (Backblaze), and a part
 can become slow long before it fails completely (Gunawi et al.). Three S3 systems
 target this kind of use, each with a different design idea:
-
+#figure(
+image("img/ssd.png"),caption: [Price trend of a 4TB NVMe SSD from Apr. 2025 to Sept. 2026]
+)
 - *Garage* is built for cheap, mismatched nodes on slow links (Deuxfleurs).
 - *MinIO* is built for identical machines in a datacenter (MinIO docs).
 - *SeaweedFS* is built for many small files, with a central master for metadata
@@ -276,8 +279,8 @@ the ratios between nodes were kept. The CPU limit held within 5 %, except at 0.2
 (85 % of the target). Our first disk budget was too high for the virtual disk, so we
 lowered it: otherwise the machine, not our limits, would have set the speed.
 
-*Repeatability.* We ran each system five times on identical nodes. Results varied by
-less than 5 % between runs, and the load was spread evenly over the nodes (within
+*Repeatability.* To know how many repetitions we need, we first ran each system five
+times on identical nodes. Results varied by less than 5 % between runs, and the load was spread evenly over the nodes (within
 7 %). SeaweedFS writes were the exception: they come in bursts while buffered data is
 flushed to disk, so write runs last 60 s instead of 30 s.
 
@@ -294,7 +297,8 @@ print(len(counts), "distinct objects out of", sum(counts.values()))
 ```
 
 *warp versions 1.1.0 to 1.3.1 send almost identical objects*: with 8 workers, 60
-objects written by versions 1.1.6 to 1.3.1 contained only 5 to 7 different ones, and
+objects written by versions 1.1.6 to 1.3.1 (the ones we tested) contained only 5 to 7
+different ones, and
 with a single worker all 52 objects written by v1.3.1 were identical. Each worker sends
 the same bytes again and again; we did not find which change in warp caused it.
 Garage removes duplicate 1 MiB blocks, so it stored almost nothing and its writes
@@ -350,9 +354,31 @@ is slow at *finding* data. A WD Blue 7200 rpm needs about 8.9 ms to move its hea
 laptop disk is closer to 15 to 18 ms. This gives about 75 to 130 random reads per
 second (StorageReview). Its cache absorbs writes, but a *flush* (fsync) must wait for
 the platter.
+*IOPS* (input/output operations per second) counts how many separate reads or writes
+a disk can do each second, whatever their size. For small random accesses this is what
+limits a disk; for long sequential files, throughput in MiB/s matters more.
+@tab-hdd-model compares a real hard disk, our model, and a nominal node of the sweeps.
 
-We model such a disk for node 1 only, by stacking Linux block devices, as shown in
-@fig-hdd:
+#figure(
+  table(
+    columns: (auto, auto, auto, auto),
+    inset: 5pt,
+    align: (left, right, right, right),
+    table.header([*Measure*], [*Real 7200 rpm disk*], [*Our model (fio)*], [*Nominal node*]),
+    [Time of one random read], [about 13 ms], [13 ms], [n/a (SSD)],
+    [Random reads per second, one at a time], [75 to 130], [77], [800 (cap)],
+    [Random reads per second, 16 in flight], [n/a], [149], [800 (cap)],
+    [Synchronous writes per second], [n/a], [38], [600 (cap)],
+    [Sequential read], [40 to 150 MB/s], [25 MiB/s (cap)], [25 MiB/s (cap)],
+  ),
+  caption: [A real consumer hard disk (Showmetech; StorageReview), our model measured
+  with fio, and the limits of a nominal node. n/a: no published figure found.],
+)<tab-hdd-model>
+
+We give the hard disk to node 1 only. The question of this study is what *one* bad
+node does to a cluster of good ones; a cluster made only of hard disks would be
+another homogeneous cluster, compared with nothing. We build the disk by stacking
+Linux block devices, as shown in @fig-hdd:
 
 + a sparse file on the VM disk, used as a block device (loop device);
 + *dm-delay* on top, which delays every read by 13 ms, every write by 2 ms (the
@@ -386,9 +412,8 @@ size=$(blockdev --getsz $loop)
 dmsetup create hdd-node1 --table "0 $size delay $loop 0 13 $loop 0 2 $loop 0 20"
 ```
 
-The CPU and network of node 1 stay nominal. We checked the model with fio: 77 random
-reads per second at 13 ms with one request at a time (a real 7200 rpm disk: 75 to 80),
-149 per second with 16 requests in flight, and 38 synchronous writes per second.
+The CPU and network of node 1 stay nominal. @tab-hdd-model shows the fio measurements
+of the model.
 
 Reads of recently written data would come from memory and never reach this disk.
 During the read runs of this experiment, we therefore ask the kernel every second to
@@ -406,8 +431,9 @@ $ T_i = (sum_(q in cal(R)_i) b_q) / (Delta t_i) $
 
 *One condition ($T(c)$).* A condition $c$ fixes everything we control: system,
 operation (PUT or GET), object size, which resource is slowed down, by how much, on
-how many nodes, and which nodes the client talks to. It is run 3 times, and we keep
-the middle value (the median), which ignores one unusually fast or slow run:
+how many nodes, and which nodes the client talks to. It is run 3 times (the 5 runs of
+the repeatability check showed that 3 are enough, since runs differ by less than 5 %),
+and we keep the middle value (the median), which ignores one unusually fast or slow run:
 $ T(c) = "median"(T_1, T_2, T_3) $
 
 *Ratio ($r$).* $c_0$ is the same condition with identical nodes: everything equal,
@@ -450,6 +476,10 @@ GET  1048576  http://garage-node2:3900  39202434
 GET  1048576  http://garage-node3:3900  37270406
 ```
 
+The size is in bytes: 1048576 bytes = 1024 × 1024 = 1 MiB, the object size of this
+example. Small objects (16 KiB = 16384 bytes) are only used in S4 and in the hard disk
+experiment.
+
 *2. One run.* After the 3 s of warm up, the first run moved 1845 MiB in 27.2 s, so
 $T_1 = 1845 slash 27.2 approx 67.7$ MiB/s. The two other runs give 67.3 and 67.6 MiB/s.
 
@@ -476,7 +506,9 @@ Each campaign follows these steps:
   (Deuxfleurs). MinIO repairs the new drive on its own. SeaweedFS needs an operator to
   run `volume.fix.replication` (SeaweedFS docs).
 + Wait until the new node holds 95 % of the bytes of the other nodes: the rebuild is
-  done.
+  done. We do not wait for 100 %, because the old nodes also hold things the new one
+  never gets back, such as their metadata history and logs, so 100 % might never be
+  reached. The final data check then confirms that every object is there.
 + Keep reading for 60 s, then check every object one last time.
 
 The client only talks to the two nodes that are never killed. This way, a dead
@@ -499,9 +531,9 @@ of a point is 5 %, and only one request failed in total.
 == Q1 and Q3: the cluster follows its weakest node
 
 We first want to know how much a single slow node costs, and which model the cluster
-follows. *With one node 5 times slower, every system loses 61 to 82 % of its
-throughput, and behaves close to its weakest node.* @tab-s2 gives the ratio $r$ for
-each system and slowdown, and @fig-s2 plots it.
+follows. *The cluster behaves close to its weakest node.* @tab-s2 gives the ratio $r$
+for each system and slowdown, and @fig-s2 plots it. At 5x, $r$ is between 0.18 and
+0.39: every system keeps only 18 to 39 % of its throughput, so it loses 61 to 82 %.
 
 #figure(
   table(
@@ -524,13 +556,12 @@ each system and slowdown, and @fig-s2 plots it.
   caption: [S2: throughput compared with identical nodes, as one node gets slower.
   Dashed lines: the two models (average node, weakest node).])<fig-s2>
 
-A cluster that followed its average node would lose nothing; one that followed its
-weakest node would lose 80 % at 5x. $W$ is 0.76 to 1.02 at 5x, and 0.89 to 1.03 at
-10x.
+A cluster that followed its average node would keep $r = 1$; one that followed its
+weakest node would drop to $r = 1 slash k$: 0.50 at 2x, 0.20 at 5x, 0.10 at 10x.
 
-- MinIO writes follow the weakest node almost exactly ($W$ 1.01 to 1.03).
-- Garage and SeaweedFS writes do a bit better at 2x and 5x ($W$ 0.69 to 0.83). For
-  Garage, this margin disappears at 10x.
+- MinIO writes match the weakest node almost exactly: $r$ = 0.49, 0.18 and 0.09.
+- Garage and SeaweedFS writes do a bit better at 2x and 5x ($r$ 0.58 to 0.65 at 2x,
+  0.34 to 0.39 at 5x). For Garage, this margin disappears at 10x ($r$ = 0.09).
 - Slow requests suffer much more than average ones. At 5x, the 99th percentile
   latency is 3 to 10 times higher, and up to 45 times for Garage reads at 10x.
 
@@ -539,10 +570,9 @@ there is no sudden collapse.
 
 == S1: which resource matters most
 
-Next we slow down one resource at a time. *Which resource hurts depends on the
-operation: a slow network hurts every read, a slow disk every write, and a slow CPU
-separates the designs.* @fig-s1 shows the ratio for each resource.
-
+Next we slow down one resource at a time. *It depends on the operation*: a slow
+network hurts every read, a slow disk every write, and a slow CPU separates the
+designs. @fig-s1 shows the ratio for each resource.
 #figure(image("../figures/s1_resource.png", width: 100%),
   caption: [S1: one resource of one node made 5 times slower.])<fig-s1>
 
@@ -616,8 +646,8 @@ flowchart LR
   other nodes, inside the cluster (dotted link).],
 )<fig-gw-schema>
 
-*Writes always follow the weakest node; reads only escape it on Garage, and only when
-the client avoids the slow node.* @fig-gw compares the two setups.
+*Writes always follow the weakest node*; reads only escape it on Garage, and only when
+the client avoids the slow node. @fig-gw compares the two setups.
 
 #figure(image("../figures/gateway.png", width: 100%),
   caption: [S2 with the client on all three nodes (dotted) and on the two healthy
@@ -626,7 +656,12 @@ the client avoids the slow node.* @fig-gw compares the two setups.
 - *Garage reads* get *faster* than on identical nodes ($r$ 1.12 to 1.25, against 0.07
   to 0.77 through the slow gateway). Garage reads from the healthy nodes, which
   received the budget of the slow one. All of its read loss in the sweeps came from
-  the gateway.
+  the gateway. The reason is in its code: to read, a Garage node only asks as many
+  nodes as it needs, choosing itself first, then the nodes with the lowest latency
+  (`request_order` in `src/rpc/rpc_helper.rs`). With 3 copies on 3 nodes, a healthy
+  gateway already holds every block, and the metadata it needs from a second node
+  comes from the other healthy one, which answers faster. It never has to wait for the
+  slow node.
 - *MinIO and SeaweedFS reads* recover at 2x, but still lose at 5x and 10x ($r$ 0.16 to
   0.48, $W$ 0.66 to 0.93): their read path still waits for the slow node. For MinIO
   this fits erasure coding, where 2 of the 3 shards are needed to rebuild an object.
@@ -643,8 +678,10 @@ We first found that some writes looked *faster* with the hard disk (Garage small
 writes, $r = 1.42$). The reason was not the disk: the hard disk node has its own file
 system, while the other nodes share the file system of the VM disk, with a single
 journal. We therefore added a control: the same stack (own file system, loop device,
-dm-delay) with 0 ms of delay and the nominal IOPS. @tab-hdd gives the effect of the
-hard disk alone, $T("hdd") slash T("control")$.
+dm-delay) with 0 ms of delay and the nominal IOPS. In this section the ratio
+compares the hard disk with that control instead of with identical nodes:
+$ r_"hdd" = T("hdd") / T("control") $
+where the control plays the role of $c_0$. @tab-hdd gives $r_"hdd"$.
 
 #figure(
   table(
@@ -683,36 +720,47 @@ made of many small files).
 == Q2: node kill and rebuild
 
 Finally we kill nodes, to see what the user loses and how long the cluster stays with
-one copy less. *No data was lost in 51 campaigns, but the service often froze, and
-Garage rebuilds ten times slower than the others.* @tab-kill summarises the main
-campaigns, and @fig-kill shows the read throughput around a kill.
+one copy less. *No data was lost* in 51 campaigns, but the service often froze, and
+Garage rebuilds ten times slower than the others. @tab-freeze counts the freezes, that
+is the campaigns in which the client got no answer at all for 10 s or more while the
+node was dead (for Garage this includes the rebuild tests below, which are identical
+until the replacement). @tab-rebuild-time gives the rebuild time, from the replacement
+until the new node holds its data, and the read speed during the rebuild divided by
+the speed before the kill (not counting the campaigns where the slow node died, where
+reads got faster, see below). @fig-kill shows the read throughput around a kill.
+
+#let bad = rgb("#fdecea")
+#let mid = rgb("#fff4e0")
+#let good = rgb("#eafaf1")
 
 #figure(
   table(
-    columns: (auto, auto, auto, auto, auto),
+    columns: (auto, auto, auto, auto),
     inset: 5pt,
-    align: (left, left, right, right, right),
-    table.header([*System*], [*Scenario*], [*Froze (10 s or more)*], [*Rebuild*], [*Speed during rebuild*]),
-    [Garage], [identical nodes], [5 of 6, 60 to 118 s], [652 to 663 s], [1.00 to 1.03],
-    [Garage], [slow node killed], [0 of 6], [678 to 690 s], [0.93 to 1.02],
-    [Garage], [healthy node killed], [7 of 9, 65 to 118 s], [632 to 656 s], [0.98 to 1.02],
-    [MinIO], [identical nodes], [0 of 2], [38 s], [0.88 to 0.93],
-    [MinIO], [slow node killed], [0 of 2], [53 to 54 s], [1.54 to 1.70],
-    [MinIO], [healthy node killed], [2 of 5, 41 to 49 s], [47 to 64 s], [0.81],
-    [SeaweedFS], [identical nodes], [0 of 2], [73 to 74 s], [0.91 to 0.94],
-    [SeaweedFS], [slow node killed], [1 of 2, 20 s], [70 to 72 s], [2.19 to 2.44],
-    [SeaweedFS], [healthy node killed], [4 of 5, 30 to 50 s], [67 to 103 s], [0.88 to 1.00],
+    align: (left, center, center, center),
+    table.header([*System*], [*Identical nodes*], [*Slow node killed*], [*Healthy node killed*]),
+    [Garage], table.cell(fill: bad)[5 of 6], table.cell(fill: good)[0 of 6], table.cell(fill: bad)[7 of 9],
+    [MinIO], table.cell(fill: good)[0 of 2], table.cell(fill: good)[0 of 2], table.cell(fill: mid)[2 of 5],
+    [SeaweedFS], table.cell(fill: good)[0 of 2], table.cell(fill: mid)[1 of 2], table.cell(fill: bad)[4 of 5],
   ),
-  caption: [Node kill campaigns with default settings. Froze: campaigns in which the
-  client got no answer at all for 10 s or more while the node was dead (for Garage,
-  this also counts the rebuild tests, which are identical until the replacement). Rebuild: from
-  the replacement to the moment the new node holds its data. Speed during rebuild:
-  median read throughput divided by the throughput before the kill.],
-)<tab-kill>
+  caption: [Campaigns in which the service froze for 10 s or more],
+)<tab-freeze>
+
+#figure(
+  table(
+    columns: (auto, auto, auto),
+    inset: 5pt,
+    align: (left, center, center),
+    table.header([*System*], [*Rebuild time*], [*Read speed during rebuild*]),
+    [Garage], table.cell(fill: bad)[632 to 690 s], table.cell(fill: good)[0.93 to 1.03],
+    [MinIO], table.cell(fill: good)[38 to 64 s], table.cell(fill: mid)[0.81 to 0.93],
+    [SeaweedFS], table.cell(fill: good)[67 to 103 s], table.cell(fill: mid)[0.88 to 1.00],
+  ),
+  caption: [Rebuild of 500 MiB with default settings],
+)<tab-rebuild-time>
 
 #figure(image("../figures/kill_timelines.png", width: 100%),
-  caption: [Read throughput seen by the client around a node kill (first repetition
-  of each scenario).])<fig-kill>
+  caption: [Read throughput around a node kill (first repetition of each scenario)])<fig-kill>
 
 *No data was lost.* In every campaign, all 500 objects were readable with one node
 dead, and again after the rebuild, with the right SHA256.
@@ -722,7 +770,7 @@ for up to two minutes, although it only talks to the surviving nodes. The surviv
 nodes keep waiting for the dead one until a timeout: a `docker kill` behaves like a
 power cut, the node does not close its connections and its packets are simply lost.
 Freezes happened on all three systems, most often when a healthy node died next to a
-slow one (@tab-kill). For Garage, it depends on which node dies: it froze in 12 of the
+slow one (@tab-freeze). For Garage, it depends on which node dies: it froze in 12 of the
 15 campaigns where node 3 died, and in none of the 6 where node 1 died. We did not
 find why.
 
@@ -747,19 +795,10 @@ campaigns (90 % of the data back within 59 to 95 s) and did nothing in the 3 oth
 we suspect the repair sometimes starts before the new node has accepted the new
 layout, but we did not check it.
 
-*A fast rebuild is paid by the users.* @tab-rebuild sums up the trade off.
-
-#figure(
-  table(
-    columns: (1fr, 1fr),
-    inset: 6pt,
-    align: (left, left),
-    table.header([*Slow rebuild (Garage, default)*], [*Fast rebuild (MinIO, SeaweedFS, Garage with repair)*]),
-    [*Pro:* the client does not notice it (0.93 to 1.03)], [*Pro:* data has all its copies again after about 1 minute],
-    [*Con:* data stays with one copy less for more than 10 minutes], [*Con:* the client loses up to 19 % (MinIO), 12 % (SeaweedFS) or 32 % (Garage with repair) of its read speed during the rebuild],
-  ),
-  caption: [Slow against fast rebuild],
-)<tab-rebuild>
+*A fast rebuild is paid by the users*: MinIO and SeaweedFS have all their copies
+back after about a minute but slow reads by up to 19 % meanwhile (32 % for Garage with
+an immediate repair), while the default Garage rebuild is invisible to the client but
+leaves the data with one copy less for more than 10 minutes.
 
 *Losing the slow node makes the cluster faster.* When the slow node dies, MinIO and
 SeaweedFS read 1.7 to 3.5 times faster than before, while the node is dead
@@ -792,9 +831,12 @@ SMR effects, the shingled disks whose writes collapse once their cache is full
 (iXsystems; Storage Disk Prices).
 
 *The second client disagrees on SeaweedFS.* warp had to be pinned to an older version,
-and the second client differs from it by 30 to 47 % on SeaweedFS. Our ratios always
-compare runs made with the same client, so they are less affected than absolute
-numbers.
+and the second client differs from it by 30 to 47 % on SeaweedFS. If one client
+measures SeaweedFS, say, 30 % too fast, it does so on identical nodes and on degraded
+nodes alike, and the error cancels out in $r = T(c) slash T(c_0)$, like a scale that
+weighs everything 30 % too heavy still gives the right ratio between two weights. This
+only holds if the error is the same in both conditions, which we could not check, so
+absolute numbers for SeaweedFS should be read with care.
 
 *"Rebuilt" means the bytes are back.* It does not prove every internal structure is
 repaired. The final data check covers what users see.
@@ -811,27 +853,23 @@ a minute or, for Garage, more than ten.
 *Q3.* Mostly the weakest node. Writes always follow it, because every copy must be
 written. Reads depend on the design and on the client.
 
-@tab-verdict confronts each design claim with what we measured.
+@tab-verdict checks each design claim against our measurements.
 
 #figure(
   table(
-    columns: (auto, 1fr, 1fr),
+    columns: (auto, auto, 1fr),
     inset: 6pt,
-    align: (left, left, left),
-    table.header([*System*], [*Holds in our tests*], [*Does not hold*]),
-    [Garage \ (mismatched nodes)], [reads go around the slow node and even get faster;
-      the rebuild does not disturb clients], [writes still follow the slow node; reads
-      only escape if clients avoid it; long freezes when some nodes die; 10 minutes
-      before the rebuild starts],
-    [MinIO \ (identical machines)], [fast rebuild (about 1 minute); writes durable at once],
-    [follows its weakest node most closely; loses most with a hard disk, especially for
-      small object reads],
-    [SeaweedFS \ (small files)], [large reads at full speed on a hard disk; fast rebuild],
-    [loses more on small files than on large ones ($W$ up to 1.16); the slow node still
-      slows reads at 5x and 10x],
+    align: (left, center, left),
+    table.header([*Claim*], [*Verdict*], [*Why*]),
+    [Garage handles mismatched nodes], table.cell(fill: mid)[partly],
+      [reads avoid the slow node, but only if clients avoid it too; writes still wait for it],
+    [MinIO needs identical machines], table.cell(fill: good)[yes],
+      [it follows its weakest node most closely, and loses most with a hard disk],
+    [SeaweedFS is good at small files], table.cell(fill: bad)[no, here],
+      [with a weak node, small files lose more than large ones; only large reads stay fast on a hard disk],
   ),
-  caption: [Design claims against our measurements, for this setup only],
-)<tab-verdict>
+  caption: [Design claims against our measurements (this setup only)],
+)<tab-verdict> 
 
 For someone building storage from old machines, three practical lessons follow. Do not
 use the weakest machine as an entry point for clients. Avoid putting an old hard disk

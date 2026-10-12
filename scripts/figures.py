@@ -163,10 +163,17 @@ def kill_figures(d, out):
                 ax.set_ylabel(f"{NAMES[s]}\nGET MiB/s")
             if i == 2:
                 ax.set_xlabel("time (s)")
-    fig.suptitle("Client GET throughput around a node kill\n"
-                 "grey: node dead, dotted: every object read back, blue: rebuild",
-                 color=INK, fontsize=10)
-    save(fig, out, "kill_timelines")
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+    handles = [Patch(color="#f0efec", label="node dead"),
+               Line2D([0], [0], color=INK2, lw=0.8, ls=":", label="every object read back"),
+               Patch(color="#cde2fb", label="rebuild")]
+    fig.legend(handles=handles, loc="lower center", ncol=3, fontsize=8)
+    fig.suptitle("Client GET throughput around a node kill", color=INK, fontsize=10)
+    fig.tight_layout(rect=(0, 0.04, 1, 1))
+    fig.savefig(os.path.join(out, "kill_timelines.png"))
+    fig.savefig(os.path.join(out, "kill_timelines.svg"))
+    plt.close(fig)
 
     # rebuild duration and client throughput during the rebuild
     fig, axes = plt.subplots(1, 2, figsize=(7.2, 3.0))
