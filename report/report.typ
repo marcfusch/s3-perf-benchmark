@@ -469,7 +469,58 @@ escapes it.
 
 == Q2: node kill and rebuild
 
-// RESULTS: kill campaigns.
+We ran 18 campaigns: 3 systems, 3 scenarios, 2 repetitions each.
+
+*No data was lost.* In all 18 campaigns, all 500 objects were readable with one node
+dead, and again after the rebuild, with the right SHA256.
+
+#figure(
+  table(
+    columns: (auto, auto, auto, auto, auto),
+    inset: 5pt,
+    align: (left, left, right, right, right),
+    table.header([*System*], [*Scenario*], [*Longest stall*], [*Rebuild*], [*Speed during rebuild*]),
+    [Garage], [identical nodes], [0 s, 82 s], [652 to 663 s], [1.00 to 1.03],
+    [Garage], [slow node killed], [0 s, 0 s], [678 to 690 s], [0.93 to 1.02],
+    [Garage], [healthy node killed], [0 s, 68 s], [632 to 656 s], [0.98 to 1.02],
+    [MinIO], [identical nodes], [0 s, 0 s], [38 s], [0.88 to 0.93],
+    [MinIO], [slow node killed], [0 s, 0 s], [53 to 54 s], [1.54 to 1.70],
+    [MinIO], [healthy node killed], [0 s, 41 s], [59 to 64 s], [0.81],
+    [SeaweedFS], [identical nodes], [0 s, 0 s], [73 to 74 s], [0.91 to 0.94],
+    [SeaweedFS], [slow node killed], [20 s, 0 s], [70 to 72 s], [2.19 to 2.44],
+    [SeaweedFS], [healthy node killed], [50 s, 30 s], [67 to 88 s], [0.88 to 1.00],
+  ),
+  caption: [Node kill campaigns (2 repetitions per line). Stall: the longest time
+  without a single answer to the client while the node is dead. Rebuild: from the
+  replacement to the moment the new node holds its data. Speed during rebuild: median
+  read throughput divided by the throughput before the kill.],
+)<tab-kill>
+
+#figure(image("../figures/kill_timelines.png", width: 100%),
+  caption: [Read throughput seen by the client around a node kill (first repetition
+  of each scenario).])<fig-kill>
+
+*The service can freeze after a node dies.* In 6 of the 18 campaigns, the client got
+no answer at all for 20 to 82 s right after the kill, although it only talks to the
+surviving nodes (@tab-kill). The surviving nodes keep waiting for the dead one until
+a timeout. A `docker kill` behaves like a power cut: the node does not close its
+connections, its packets are simply lost. Whether a freeze happens depends on which
+requests were in flight at that moment, so it varies between repetitions. It happened
+on all three systems, most often when a *healthy* node died next to a slow one (4 of
+6 campaigns).
+
+*Rebuild time differs by a factor of 10.* MinIO and SeaweedFS rebuild 500 MiB in
+about one minute. Garage takes about 11 minutes. Its default settings rebuild slowly
+on purpose: one worker, which pauses twice as long as it works (Garage source code,
+`resync.rs`). The client does not notice the Garage rebuild at all (0.93 to 1.03),
+while MinIO and SeaweedFS lose up to 19 % and 12 % of their read speed during their
+faster rebuild.
+
+*Losing the slow node makes the cluster faster.* When the slow node dies, MinIO and
+SeaweedFS read 1.7 to 3.5 times faster than before, while the node is dead
+(@fig-kill). They were waiting for it. The replacement node gets the same limits, so
+speed drops back once it rejoins. Garage reads barely change, because its reads did
+not depend on the slow node in the first place (see the gateway effect).
 
 = Threats to Validity
 

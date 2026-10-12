@@ -115,6 +115,16 @@ def analyse(run):
         if v and v["mean_mib_s"] is not None and base_mean:
             v["mean_ratio"] = v["mean_mib_s"] / base_mean
 
+    # longest stall over the whole time the node is dead (kill to replacement)
+    stall_dead = streak = 0
+    prev = None
+    for sec, m, e in timeline:
+        if not (ev["t_kill"] <= sec < ev["t_replace"]):
+            continue
+        streak = streak + 1 if m == 0 and (prev is None or sec == prev + 1 or streak == 0) else (1 if m == 0 else 0)
+        stall_dead = max(stall_dead, streak)
+        prev = sec
+
     victim = ev["victim"]
     reb = list(csv.DictReader(open(os.path.join(run, "rebuild.csv"))))
     new_bytes = int(reb[-1][f"node{victim}"]) if reb else 0
@@ -123,6 +133,7 @@ def analyse(run):
             "factor": ev["factor"], "n_degraded": ev["n_degraded"], "victim": victim,
             "leader": ev.get("seaweedfs_master_leader", ""),
             "rebuild_s": duration, "rebuild_mib_s": new_bytes / 2**20 / duration if duration else None,
+            "stall_while_dead_s": stall_dead,
             "check_degraded": ev["check_degraded"], "check_final": ev["check_final"], "phases": out}
 
 
@@ -145,7 +156,7 @@ def main():
             "before_mib_s": round(f("before", "mib_s") or 0, 1),
             "degraded_ratio": round(f("degraded", "ratio") or 0, 2),
             "degraded_mean_ratio": round(f("degraded", "mean_ratio") or 0, 2),
-            "stall_after_kill_s": f("degraded", "stall_s"),
+            "stall_after_kill_s": a["stall_while_dead_s"],
             "rebuild_ratio": round(f("rebuild", "ratio") or 0, 2),
             "after_ratio": round(f("after", "ratio") or 0, 2),
             "rebuild_p99_ms": round(f("rebuild", "p99_ms") or 0, 1),
