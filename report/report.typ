@@ -38,8 +38,8 @@ their split between nodes does.
 - *An old hard disk kills small file reads.* With a modelled consumer hard disk on one
   node, small object reads drop to 3 % (MinIO) to 23 % (SeaweedFS) of their speed,
   while writes are barely affected, except on MinIO.
-- *A dead node loses no data but can freeze the service.* In 42 node kill campaigns,
-  no object was ever lost, but the service froze for 20 to 118 s in many of them.
+- *A dead node loses no data but can freeze the service.* In 51 node kill campaigns,
+  no object was ever lost, but the service often froze for 20 to 118 s.
   MinIO and SeaweedFS rebuild 500 MiB in about a minute; Garage waits about 10 minutes
   for its next metadata synchronisation.
 - *The tools must be checked too.* Recent versions of warp, the reference S3
@@ -600,10 +600,13 @@ requests were in flight at that moment, so it varies between repetitions. It hap
 on all three systems, most often when a *healthy* node died next to a slow one (4 of
 6 campaigns).
 
-Garage was killed 18 times in total (the 6 campaigns above, plus 12 more for the
-rebuild tests below, which are identical until the replacement). The freeze clearly
-depends on which node dies: Garage froze in 9 of the 12 campaigns where node 3 died
-(60 to 118 s), and in none of the 6 where node 1 died. We did not find why.
+To see how often it happens, we added 3 repetitions of the scenario that froze most
+(a healthy node dies next to a slow one). Counting all repetitions of that scenario,
+the service froze for 10 s or more in 7 of 9 Garage campaigns, 4 of 5 SeaweedFS
+campaigns and 2 of 5 MinIO campaigns. Garage was killed 21 times in total (with the
+rebuild tests below, which are identical until the replacement). Its freeze depends on
+which node dies: it froze in 12 of the 15 campaigns where node 3 died (60 to 118 s),
+and in none of the 6 where node 1 died. We did not find why.
 
 *Rebuild time differs by a factor of 10.* MinIO and SeaweedFS rebuild 500 MiB in
 about one minute. Garage takes about 11 minutes. Looking at the bytes on the new node
