@@ -655,19 +655,44 @@ the client avoids the slow node. @fig-gw compares the two setups.
 
 - *Garage reads* get *faster* than on identical nodes ($r$ 1.12 to 1.25, against 0.07
   to 0.77 through the slow gateway). Garage reads from the healthy nodes, which
-  received the budget of the slow one. All of its read loss in the sweeps came from
-  the gateway. The reason is in its code: to read, a Garage node only asks as many
-  nodes as it needs, choosing itself first, then the nodes with the lowest latency
-  (`request_order` in `src/rpc/rpc_helper.rs`). With 3 copies on 3 nodes, a healthy
-  gateway already holds every block, and the metadata it needs from a second node
-  comes from the other healthy one, which answers faster. It never has to wait for the
-  slow node.
+  received the budget of the slow one.
 - *MinIO and SeaweedFS reads* recover at 2x, but still lose at 5x and 10x ($r$ 0.16 to
-  0.48, $W$ 0.66 to 0.93): their read path still waits for the slow node. For MinIO
-  this fits erasure coding, where 2 of the 3 shards are needed to rebuild an object.
+  0.48): their reads still go through the slow node.
 - *Writes* follow the weakest node on all systems, with or without the slow gateway
   ($W$ 0.70 to 1.03). Every write must reach the nodes that store the copies, including
   the slow one.
+
+@tab-gw-traffic shows why, with the network traffic sent by each node during these
+read runs.
+
+#figure(
+  table(
+    columns: (auto, auto, auto),
+    inset: 5pt,
+    align: (left, center, center),
+    table.header([*System*], [*Node 1 (slow)*], [*Nodes 2 and 3*]),
+    [Garage], table.cell(fill: rgb("#eafaf1"))[0.0 MiB/s], [94.5 MiB/s],
+    [MinIO], table.cell(fill: rgb("#fdecea"))[19.4 MiB/s], [38 MiB/s],
+    [SeaweedFS], table.cell(fill: rgb("#fdecea"))[23.0 MiB/s], [45 MiB/s],
+  ),
+  caption: [Data sent by each node during reads, client on nodes 2 and 3 only, node 1
+  five times slower (median of 3 runs)],
+)<tab-gw-traffic>
+
+Garage never reads from the slow node. To read, a Garage node asks only as many nodes
+as it needs, itself first, then the ones with the lowest latency (Garage source code,
+`src/rpc/rpc_helper.rs`):
+
+```rust
+// prefer ourself, then nodes in the same zone, then the lowest ping
+nodes.sort_by_key(|(diffnode, diffzone, ping, _to)| (*diffnode, *diffzone, *ping));
+```
+
+With 3 copies on 3 nodes, a healthy gateway already holds every block. MinIO and
+SeaweedFS still read about a third of the data from the slow node, which sends 19 to
+23 MiB/s: its link is capped at 200 Mbit/s (about 24 MiB/s), so it is full, and the
+whole cluster waits for it. For MinIO this fits erasure coding, where 2 of the 3 pieces
+of an object are needed to rebuild it.
 
 == An old hard disk in the cluster
 
@@ -678,10 +703,8 @@ We first found that some writes looked *faster* with the hard disk (Garage small
 writes, $r = 1.42$). The reason was not the disk: the hard disk node has its own file
 system, while the other nodes share the file system of the VM disk, with a single
 journal. We therefore added a control: the same stack (own file system, loop device,
-dm-delay) with 0 ms of delay and the nominal IOPS. In this section the ratio
-compares the hard disk with that control instead of with identical nodes:
-$ r_"hdd" = T("hdd") / T("control") $
-where the control plays the role of $c_0$. @tab-hdd gives $r_"hdd"$.
+dm-delay) with 0 ms of delay and the nominal IOPS. In this section, $c_0$ is this
+control instead of identical nodes, and @tab-hdd gives the ratio $r$.
 
 #figure(
   table(
@@ -693,7 +716,7 @@ where the control plays the role of $c_0$. @tab-hdd gives $r_"hdd"$.
     [MinIO], [0.03], [0.17], [0.52], [0.74],
     [SeaweedFS], [0.23], [0.98], [1.17], [0.95],
   ),
-  caption: [Throughput with a hard disk on node 1, divided by the control (same stack,
+  caption: [Ratio $r$ with a hard disk on node 1 ($c_0$: the control, same stack with
   no delay). Reads drop the page cache every second, so they reach the disks. 3 runs
   per value.],
 )<tab-hdd>
