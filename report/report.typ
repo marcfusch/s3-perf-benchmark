@@ -1,3 +1,7 @@
+#import "@preview/merman:0.3.0": mermaid
+
+#show raw.where(block: true): block.with(fill: luma(246), inset: 8pt, radius: 4pt, width: 100%)
+
 #set page(
   header: [ _Marc Fuschino_ #h(1fr) MGL870 ],
   footer: [
@@ -147,13 +151,49 @@ features, which makes every condition exactly reproducible:
 - *Network*: `tc netem` caps the outgoing rate and adds delay; incoming traffic is
   capped at the same rate (tc-netem man page).
 
+For example, making node 1 five times slower comes down to these commands (simplified
+from `limits.sh`; the disk numbers are the major and minor numbers of the VM disk):
+
+```bash
+# CPU: 0.2 of a core
+docker update --cpus 0.2 garage-node1
+# Disk: 5 MiB/s read, 8 MiB/s write, 160 and 120 IOPS, in the container's cgroup
+echo "253:16 rbps=5242880 wbps=8388608 riops=160 wiops=120" \
+  > /sys/fs/cgroup/docker/<container id>/io.max
+# Network, run inside the container's network namespace:
+# 200 Mbit/s and 5 ms of delay on the way out, 200 Mbit/s on the way in
+tc qdisc add dev eth0 root netem delay 5ms rate 200mbit
+tc qdisc add dev eth0 handle ffff: ingress
+tc filter add dev eth0 parent ffff: matchall action police rate 200mbit burst 1m drop
+```
+
 A nominal node has 1 CPU, 25 MiB/s read, 40 MiB/s write, 800 read IOPS, 600 write
 IOPS, and a 1 Gbit/s link with 1 ms delay.
 
 *The total budget of the cluster never changes.* When a node is made $k$ times
-slower, it gets $1 slash k$ of the nominal resources, and what it loses is shared
+slower, it gets $1 slash k$ of the slower, it gets $1 slash k$ of the nominal resources, and what it loses is shared
 between the healthy nodes. Only the split changes. (Delay is the exception: a slow
 node gets $k$ times the nominal delay.)
+
+#figure(
+  mermaid(
+    "
+flowchart LR
+  LG[warp client] --> N1[\"Node 1: 0.2 CPU, 5 MiB/s disk read, 200 Mbit/s\"]
+  LG --> N2[\"Node 2: 1.4 CPU, 35 MiB/s disk read, 1.4 Gbit/s\"]
+  LG --> N3[\"Node 3: 1.4 CPU, 35 MiB/s disk read, 1.4 Gbit/s\"]
+  classDef weak fill:#fdecea,stroke:#c0392b
+  classDef ok fill:#eafaf1,stroke:#27ae60
+  class N1 weak
+  class N2,N3 ok
+",
+    document-context: true,
+    width: 70%,
+  ),
+  caption: [The bench at the reference point: node 1 is 5 times slower, and its lost
+  resources go to nodes 2 and 3, so the cluster keeps 3 CPU in total. The nodes also
+  talk to each other (replication, metadata), not drawn here.],
+)<fig-bench>
 
 This makes Q3 easy to read, with two numbers defined precisely in the Method
 section:
@@ -213,6 +253,22 @@ Every run follows the same steps:
 + `summarize.py` turns the raw data into one summary per run: throughput, latency
   percentiles (overall and per node) and resources per node.
 
+#figure(
+  mermaid(
+    "
+flowchart TB
+  U[up.sh] --> L[limits.sh]
+  L --> W[run_warp.sh: warp and sampler]
+  W --> D[down.sh]
+  W --> S[summarize.py]
+  S --> R[reports, figures]
+",
+    document-context: true,
+    width: 50%,
+  ),
+  caption: [Path of one run, from the plan of a campaign to the figures],
+)
+
 A campaign is a list of runs in random order. Random order spreads slow periods of
 the machine over all conditions instead of hitting one of them. Campaigns can be
 stopped and restarted: finished runs are skipped. The raw data is kept, so every
@@ -240,7 +296,16 @@ flushed to disk. Longer write runs (60 s) reduce this.
 instead of trusting it. We read back the objects warp had written and compared their
 SHA256 hashes. *warp versions 1.1.0 to 1.3.1 send almost identical objects*: with 8
 workers, 60 objects written by versions 1.1.6 to 1.3.1 contained only 5 to 7 different
-ones, and with a single worker all 52 objects written by v1.3.1 were identical. So each worker sends the same bytes
+ones, and with a single worker all 52 objects written by v1.3.1 were identical. The check itself is
+short (from `uniqueness.py`):
+
+```python
+counts = collections.Counter()
+for key in keys[:100]:                       # objects written by warp
+    data = s3.get_object(Bucket="bench", Key=key)["Body"].read()
+    counts[hashlib.sha256(data).digest()] += 1
+print(len(counts), "distinct objects out of", sum(counts.values()))
+``` So each worker sends the same bytes
 again and again. The random data generator itself did not change between v1.0.8 and
 v1.1.0, so the regression comes from another part of the code; we did not find which. Garage removes
 duplicate 1 MiB blocks, so it stored almost nothing and its writes looked twice as
@@ -308,6 +373,30 @@ We model such a disk for node 1 only, by stacking Linux block devices:
 + `io.max` on that device, capped at 150 reads and 200 writes per second: dm-delay
   delays operations in parallel, while a disk has a single head;
 + an ext4 file system, mounted as the volume of node 1.
+
+#figure(
+  mermaid(
+    "
+flowchart TB
+  V[volume of node 1, ext4] --> T[io.max: 150 reads/s, 200 writes/s]
+  T --> DD[dm-delay: read 13 ms, write 2 ms, flush 20 ms]
+  DD --> LO[loop device]
+  LO --> F[sparse file on the VM disk]
+",
+    document-context: true,
+    width: 36%,
+  ),
+  caption: [The modelled hard disk of node 1, from the file system down to the real disk],
+)
+
+The core of the model is one device mapper table: read delay, write delay and flush
+delay, each in milliseconds, on top of the loop device (from `hdd.sh`):
+
+```bash
+loop=$(losetup --direct-io=on -f --show hdd-node1.img)
+size=$(blockdev --getsz $loop)
+dmsetup create hdd-node1 --table "0 $size delay $loop 0 13 $loop 0 2 $loop 0 20"
+```
 
 The CPU and network of node 1 stay nominal. We checked the model with fio: 77 random
 reads per second at 13 ms with one request at a time (a real 7200 rpm disk: 75 to 80),
@@ -481,7 +570,33 @@ robin, see Load and measurements). The slow node then answers slowly no matter
 what the storage system does inside. To separate the two effects, we ran S2 again
 with a client that only talks to the two healthy nodes. Its reference $c_0$ is
 also measured with the client on the two healthy nodes, so the ratio only
-measures what the slow node costs *inside* the cluster.
+measures what the slow node costs *inside* the cluster. @fig-gw-schema shows the two setups.
+
+#figure(
+  grid(
+    columns: (1fr, 1fr),
+    gutter: 12pt,
+    mermaid("
+flowchart LR
+  C[Client] --> N1[Node 1 slow]
+  C --> N2[Node 2]
+  C --> N3[Node 3]
+  classDef weak fill:#fdecea,stroke:#c0392b
+  class N1 weak
+", document-context: true, width: 72%),
+    mermaid("
+flowchart LR
+  C[Client] --> N2[Node 2]
+  C --> N3[Node 3]
+  N2 -.-> N1[Node 1 slow]
+  classDef weak fill:#fdecea,stroke:#c0392b
+  class N1 weak
+", document-context: true, width: 100%),
+  ),
+  caption: [Left: the sweeps, where the slow node is also a gateway. Right: the gateway
+  test, where the client only uses healthy nodes; the slow node is only reached by the
+  other nodes, inside the cluster (dotted link).],
+)<fig-gw-schema>
 
 #figure(image("../figures/gateway.png", width: 100%),
   caption: [S2 with the client on all three nodes (dotted) and on the two healthy
@@ -614,7 +729,16 @@ about one minute. Garage takes about 11 minutes. Looking at the bytes on the new
 over time explains why: for about 10 minutes nothing arrives, then everything is copied
 in about 40 s. Garage only learns which blocks the new node must hold when its
 metadata tables run a full synchronisation, which happens every 10 minutes for tables
-split between nodes (`ANTI_ENTROPY_INTERVAL`, Garage source code, `sharded.rs`). The
+split between nodes (Garage source code, simplified):
+
+```rust
+// src/table/replication/sharded.rs
+const ANTI_ENTROPY_INTERVAL: Duration = Duration::from_secs(10 * 60);
+// src/block/resync.rs: default rebuild settings
+const INITIAL_RESYNC_TRANQUILITY: u32 = 2;   // sleep twice the time spent working
+ResyncPersistedConfig { n_workers: 1, tranquility: INITIAL_RESYNC_TRANQUILITY }
+```
+ The
 rebuild speed settings do not help: with 4 resync workers instead of 1 and no pause
 between blocks (default: the worker sleeps twice as long as it works, `resync.rs`),
 the rebuild still took 616 to 672 s, with nothing copied before the next round. An
