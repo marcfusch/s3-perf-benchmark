@@ -603,8 +603,9 @@ on all three systems, most often when a *healthy* node died next to a slow one (
 To see how often it happens, we added 3 repetitions of the scenario that froze most
 (a healthy node dies next to a slow one). Counting all repetitions of that scenario,
 the service froze for 10 s or more in 7 of 9 Garage campaigns, 4 of 5 SeaweedFS
-campaigns and 2 of 5 MinIO campaigns. Garage was killed 21 times in total (with the
-rebuild tests below, which are identical until the replacement). Its freeze depends on
+campaigns and 2 of 5 MinIO campaigns. Outside the hard disk campaigns, Garage was
+killed 21 times (with the rebuild tests below, which are identical until the
+replacement). Its freeze depends on
 which node dies: it froze in 12 of the 15 campaigns where node 3 died (60 to 118 s),
 and in none of the 6 where node 1 died. We did not find why.
 
