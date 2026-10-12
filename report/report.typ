@@ -272,6 +272,36 @@ Each run is repeated three times, in random order, each time on a new cluster. F
 we also measure identical nodes at each object size, so we always compare the same
 size.
 
+== A modelled consumer hard disk
+
+`io.max` caps throughput and IOPS, but every operation stays as fast as the SSD
+underneath. A real hard disk is different: it is not slow at reading long files, it
+is slow at *finding* data. A WD Blue 7200 rpm needs about 8.9 ms to move its head and
+4.2 ms for the platter to turn, so about 13 ms per random access (Showmetech), and a
+laptop disk is closer to 15 to 18 ms. This gives about 75 to 130 random reads per
+second (StorageReview). Its cache absorbs writes, but a *flush* (fsync) must wait for
+the platter.
+
+We model such a disk for node 1 only, by stacking Linux block devices:
+
++ a sparse file on the VM disk, used as a block device (loop device);
++ *dm-delay* on top, which delays every read by 13 ms, every write by 2 ms (the
+  write lands in the disk cache) and every flush by 20 ms (Linux kernel docs,
+  dm-delay; Oracle Linux blog);
++ `io.max` on that device, capped at 150 reads and 200 writes per second: dm-delay
+  delays operations in parallel, while a disk has a single head;
++ an ext4 file system, mounted as the volume of node 1.
+
+The CPU and network of node 1 stay nominal. We checked the model with fio: 77 random
+reads per second at 13 ms with one request at a time (a real 7200 rpm disk: 75 to 80),
+149 per second with 16 requests in flight, and 38 synchronous writes per second.
+
+Reads of recently written data would come from memory and never reach this disk.
+During the read runs of this experiment, we therefore ask the kernel every second to
+drop the page cache of each node (cgroup `memory.reclaim`), for the homogeneous
+reference as well. Each condition is compared with identical nodes measured the same
+way.
+
 == How the numbers are computed
 
 *Throughput of one run ($T_i$).* $T_i$ is the average speed seen by the client during
@@ -467,6 +497,50 @@ So the answer to Q3 depends on the operation: writes follow the weakest node; re
 follow it too unless the client avoids the slow node, and then only Garage really
 escapes it.
 
+== An old hard disk in the cluster
+
+Node 1 gets the modelled hard disk; its CPU and network stay nominal. We first found
+that some writes looked *faster* with the hard disk (Garage small writes, $r = 1.42$).
+The reason was not the disk: the hard disk node has its own file system, while the
+other nodes share the file system of the VM disk, with a single journal. We therefore
+added a control: the same stack (own file system, loop device, dm-delay) with 0 ms of
+delay and the nominal IOPS. The effect of the hard disk alone is $T("hdd") slash T("control")$.
+
+#figure(
+  table(
+    columns: (auto, auto, auto, auto, auto),
+    inset: 5pt,
+    align: (left, right, right, right, right),
+    table.header([*System*], [*GET 16 KiB*], [*GET 1 MiB*], [*PUT 16 KiB*], [*PUT 1 MiB*]),
+    [Garage], [0.19], [0.22], [1.02], [0.91],
+    [MinIO], [0.03], [0.17], [0.52], [0.74],
+    [SeaweedFS], [0.23], [0.98], [1.17], [0.95],
+  ),
+  caption: [Throughput with a hard disk on node 1, divided by the control (same stack,
+  no delay). Reads drop the page cache every second, so they reach the disks. 3 runs
+  per value.],
+)<tab-hdd>
+
+- *Reads suffer, small objects most.* With one hard disk out of three, Garage keeps
+  about a fifth of its reads, and MinIO only 3 % of its small object reads. The 99th
+  percentile latency of reads grows 5 to 10 times on Garage and MinIO, and 27 times
+  for SeaweedFS small objects.
+- *SeaweedFS reads large objects at full speed* (0.98). This fits its design, taken
+  from Facebook's Haystack: objects are appended to large volume files and found with
+  an index in memory, so reading an object costs one disk access followed by a long
+  sequential read (Beaver et al.; SeaweedFS docs). Garage stores each 1 MiB block in
+  its own file, and MinIO splits each object into shards plus a metadata file, which
+  costs more random accesses. We did not trace the disk accesses to prove it.
+- *Writes barely notice the hard disk*, except on MinIO (0.52 and 0.74). Writes land in
+  the disk cache and in the page cache first, and Garage and SeaweedFS do not force
+  them to the platter by default. MinIO syncs its writes to disk before answering,
+which fits its larger loss: it pays for durability at once. (SeaweedFS
+  small writes at 1.17 are within the noise of these runs.)
+
+So an old hard disk in a cluster mostly hurts *reads of small files*, which is the
+typical load of a home server (documents, thumbnails, backups made of many small
+files).
+
 == Q2: node kill and rebuild
 
 We ran 18 campaigns: 3 systems, 3 scenarios, 2 repetitions each.
@@ -510,11 +584,18 @@ on all three systems, most often when a *healthy* node died next to a slow one (
 6 campaigns).
 
 *Rebuild time differs by a factor of 10.* MinIO and SeaweedFS rebuild 500 MiB in
-about one minute. Garage takes about 11 minutes. Its default settings rebuild slowly
-on purpose: one worker, which pauses twice as long as it works (Garage source code,
-`resync.rs`). The client does not notice the Garage rebuild at all (0.93 to 1.03),
-while MinIO and SeaweedFS lose up to 19 % and 12 % of their read speed during their
-faster rebuild.
+about one minute. Garage takes about 11 minutes. Looking at the bytes on the new node
+over time explains why: for about 10 minutes nothing arrives, then everything is copied
+in about 40 s. Garage only learns which blocks the new node must hold when its
+metadata tables run a full synchronisation, which happens every 10 minutes for tables
+split between nodes (`ANTI_ENTROPY_INTERVAL`, Garage source code, `sharded.rs`). The
+rebuild speed settings do not help: with 4 resync workers instead of 1 and no pause
+between blocks (default: the worker sleeps twice as long as it works, `resync.rs`),
+the rebuild still took 616 to 672 s. The client does not notice the Garage rebuild at
+all (0.93 to 1.03), while MinIO and SeaweedFS lose up to 19 % and 12 % of their read
+speed during their faster rebuild.
+
+// RESULTS: Garage with an immediate `garage repair tables` after the replacement.
 
 *Losing the slow node makes the cluster faster.* When the slow node dies, MinIO and
 SeaweedFS read 1.7 to 3.5 times faster than before, while the node is dead
@@ -539,11 +620,11 @@ conclusions hold. Random order also spreads such noise over all conditions.
 disk. The 1 GB memory limit per node bounds this, but read results say more about CPU
 and network than about disks.
 
-*Slow disk model.* `io.max` caps throughput and IOPS but adds no fixed delay to each
-operation. A real hard disk needs about 13 ms for each random access (8.9 ms seek plus
-4.2 ms rotation for a WD Blue 7200 rpm, Showmetech) and manages about 75 to 130
-random IOPS (StorageReview). Our slow disk is closer to a busy SSD than to an old hard
-disk.
+*Slow disk model.* In the sweeps, `io.max` caps throughput and IOPS but adds no fixed
+delay to each operation, so the "slow disk" there behaves like a busy SSD rather than
+an old hard disk. The separate hard disk experiment adds that delay, but it is still a
+model: no seek that depends on the distance, no SMR effects (shingled disks whose
+writes collapse once their cache is full, iXsystems; Storage Disk Prices).
 
 *Different designs.* The systems protect data differently, and SeaweedFS elects a
 master leader (we record which node it is for each run). Our conclusions are about
@@ -562,6 +643,9 @@ every internal structure is repaired. The final data check covers what users see
 = References
 
 #set par(hanging-indent: 1.5em)
+
+Beaver, D., Kumar, S., Li, H. C., Sobel, J., Vajgel, P. _Finding a needle in Haystack:
+Facebook's photo storage_. USENIX OSDI, 2010.
 
 Amazon Web Services. _Amazon S3 API Reference_.
 https://docs.aws.amazon.com/AmazonS3/latest/API/Welcome.html
