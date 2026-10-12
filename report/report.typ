@@ -171,7 +171,7 @@ A nominal node has 1 CPU, 25 MiB/s read, 40 MiB/s write, 800 read IOPS, 600 writ
 IOPS, and a 1 Gbit/s link with 1 ms delay.
 
 *The total budget of the cluster never changes.* When a node is made $k$ times
-slower, it gets $1 slash k$ of the slower, it gets $1 slash k$ of the nominal resources, and what it loses is shared
+slower, it gets $1 slash k$ of the nominal resources, and what it loses is shared
 between the healthy nodes. Only the split changes. (Delay is the exception: a slow
 node gets $k$ times the nominal delay.)
 
@@ -305,8 +305,9 @@ for key in keys[:100]:                       # objects written by warp
     data = s3.get_object(Bucket="bench", Key=key)["Body"].read()
     counts[hashlib.sha256(data).digest()] += 1
 print(len(counts), "distinct objects out of", sum(counts.values()))
-``` So each worker sends the same bytes
-again and again. The random data generator itself did not change between v1.0.8 and
+```
+
+So each worker sends the same bytes again and again. The random data generator itself did not change between v1.0.8 and
 v1.1.0, so the regression comes from another part of the code; we did not find which. Garage removes
 duplicate 1 MiB blocks, so it stored almost nothing and its writes looked twice as
 fast as they are (48.5 instead of 24.1 MiB/s). MinIO and SeaweedFS do not remove
@@ -666,8 +667,8 @@ delay and the nominal IOPS. The effect of the hard disk alone is $T("hdd") slash
 - *Writes barely notice the hard disk*, except on MinIO (0.52 and 0.74). Writes land in
   the disk cache and in the page cache first, and Garage and SeaweedFS do not force
   them to the platter by default. MinIO syncs its writes to disk before answering,
-which fits its larger loss: it pays for durability at once. (SeaweedFS
-  small writes at 1.17 are within the noise of these runs.)
+  which fits its larger loss: it pays for durability at once. (SeaweedFS small writes
+  at 1.17 are within the noise of these runs.)
 
 So an old hard disk in a cluster mostly hurts *reads of small files*, which is the
 typical load of a home server (documents, thumbnails, backups made of many small
@@ -738,8 +739,8 @@ const ANTI_ENTROPY_INTERVAL: Duration = Duration::from_secs(10 * 60);
 const INITIAL_RESYNC_TRANQUILITY: u32 = 2;   // sleep twice the time spent working
 ResyncPersistedConfig { n_workers: 1, tranquility: INITIAL_RESYNC_TRANQUILITY }
 ```
- The
-rebuild speed settings do not help: with 4 resync workers instead of 1 and no pause
+
+The rebuild speed settings do not help: with 4 resync workers instead of 1 and no pause
 between blocks (default: the worker sleeps twice as long as it works, `resync.rs`),
 the rebuild still took 616 to 672 s, with nothing copied before the next round. An
 operator can ask for this synchronisation at once (`garage repair tables`, then
