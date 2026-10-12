@@ -26,7 +26,24 @@
 
 = Summary
 
-// RESULTS: written at the end.
+Small clusters are often built from mismatched machines. We measured how three S3
+systems, Garage, MinIO and SeaweedFS, behave when one of three nodes is slower than the
+others, on a bench where the total resources of the cluster never change and only
+their split between nodes does.
+
+- *The cluster follows its weakest node.* With one node five times slower, every
+  system loses 61 to 82 % of its throughput, close to what the slowest node alone
+  would allow. Writes always pay for the slow node. Reads escape it only on Garage, and
+  only if the client does not send requests through the slow node.
+- *An old hard disk kills small file reads.* With a modelled consumer hard disk on one
+  node, small object reads drop to 3 % (MinIO) to 23 % (SeaweedFS) of their speed,
+  while writes are barely affected, except on MinIO.
+- *A dead node loses no data but can freeze the service.* In 42 node kill campaigns,
+  no object was ever lost, but the service froze for 20 to 118 s in many of them.
+  MinIO and SeaweedFS rebuild 500 MiB in about a minute; Garage waits about 10 minutes
+  for its next metadata synchronisation.
+- *The tools must be checked too.* Recent versions of warp, the reference S3
+  benchmark, send almost identical objects, which made Garage look twice as fast.
 
 = Context and Questions
 
@@ -609,6 +626,16 @@ SeaweedFS lose up to 19 % and 12 % of their read speed during their fast rebuild
 fast rebuild is paid by the users; a slow one leaves the data with one copy less for
 longer.
 
+*With a hard disk and a cold cache.* We repeated the kill with node 1 on the modelled
+hard disk and the page cache dropped every second for the whole campaign (12
+campaigns, node 3 killed, so the hard disk node must serve the rebuild). Data was
+again never lost (500/500). With the hard disk, MinIO took 154 to 196 s to rebuild
+instead of 109 to 120 s, Garage 919 to 974 s instead of about 1090 s, and SeaweedFS
+175 to 287 s instead of about 240 s. Only MinIO clearly rebuilds slower with the hard
+disk; for the two others the difference is within the spread of two repetitions.
+Dropping the cache of every container all the time is a strong disturbance, so these
+campaigns describe a worst case rather than normal operation.
+
 *Losing the slow node makes the cluster faster.* When the slow node dies, MinIO and
 SeaweedFS read 1.7 to 3.5 times faster than before, while the node is dead
 (@fig-kill). They were waiting for it. The replacement node gets the same limits, so
@@ -650,7 +677,40 @@ every internal structure is repaired. The final data check covers what users see
 
 = Conclusion
 
-// RESULTS
+*Q1.* Each system loses a lot when one node is slower: at 5 times slower, between 61
+and 82 % of its throughput, with tail latencies 3 to 10 times higher. The loss grows
+smoothly with the slowdown; there is no cliff.
+
+*Q2.* No data was lost in any campaign. The price of a dead node is availability, not
+durability: the service can freeze for up to two minutes, and the rebuild takes about
+one minute (MinIO, SeaweedFS) or more than ten (Garage). A fast rebuild costs the
+users up to a third of their speed while it runs; a slow one keeps the data with one
+copy less for longer.
+
+*Q3.* Mostly the weakest node. Writes always follow it, because every copy must be
+written. Reads depend on the design: Garage reads around the slow node and even gets
+faster than on identical nodes, MinIO and SeaweedFS do not, and with a hard disk only
+SeaweedFS keeps large reads at full speed.
+
+The design claims hold only in part. Garage does tolerate a weak node for reads, but
+not for writes, and only if clients avoid that node; its slow rebuild is a choice, not
+a weakness of the hardware. MinIO behaves like the datacenter system it is: it follows
+its weakest node closely and suffers most from a hard disk. SeaweedFS, built for small
+files, loses more on small files than on large ones when a node is weak, even more than
+its weakest node alone would explain ($W$ up to 1.16), although its design keeps large
+reads fast on a hard disk.
+
+For someone building storage from old machines, three practical lessons follow. Do not
+use the weakest machine as an entry point for clients. Avoid putting an old hard disk
+in a cluster that serves many small files. And test failures with your own hardware
+and load before trusting a system, because the numbers published on identical
+machines do not apply.
+
+*Future work.* Real mismatched machines instead of limits; shingled (SMR) hard disks,
+whose writes collapse once their cache is full; more than three nodes, where a weak
+node is a smaller share of the cluster; and the open questions of this study: why
+Garage freezes only when some nodes die, and why the second client disagrees with warp
+on SeaweedFS.
 
 = References
 
