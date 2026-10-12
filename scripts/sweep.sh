@@ -16,6 +16,9 @@
 #       its nominal CPU and network; 16 KiB and 1 MiB objects, each with its
 #       homogeneous reference. Meant to be run with RECLAIM_GET=1, so reads
 #       are not served from the page cache.
+#   FS  control for HDD: node1 gets the same stack as the hard disk (own loop
+#       file, dm-delay, ext4) but with 0 ms delays and the nominal IOPS, so
+#       T(hdd)/T(fs) isolates the hard disk from the separate file system.
 # Conditions shared by several sweeps are run once. Every condition is run
 # for PUT and GET, REPS times, in a random order, on a fresh cluster.
 # Resumable: successful runs are skipped.
@@ -40,6 +43,7 @@ conds() {
       GW) echo "none 1 0 1MiB"; for k in 2 5 10; do echo "all $k 1 1MiB"; done ;;
       CHK) echo "none 1 0 1MiB"; echo "all 5 1 1MiB" ;;
       HDD) for z in 16KiB 1MiB; do echo "none 1 0 $z"; echo "hdd 1 1 $z"; done ;;
+      FS) for z in 16KiB 1MiB; do echo "fs 1 1 $z"; done ;;
     esac
   done | sort -u
 }
@@ -72,6 +76,11 @@ while read -r sys res k nd size op r; do
   log "$sys $res ${k}x$nd $size $op rep $r"
   # a "hdd" condition gives node1 a modelled hard disk, other limits nominal
   export HDD_NODES=""; [ "$res" = hdd ] && HDD_NODES=1
+  unset HDD_READ_MS HDD_WRITE_MS HDD_FLUSH_MS HDD_RIOPS HDD_WIOPS
+  if [ "$res" = fs ]; then
+    HDD_NODES=1
+    export HDD_READ_MS=0 HDD_WRITE_MS=0 HDD_FLUSH_MS=0 HDD_RIOPS=$DISK_RIOPS HDD_WIOPS=$DISK_WIOPS
+  fi
   export RECLAIM=0; [ "$op" = get ] && RECLAIM=${RECLAIM_GET:-0}
   if ! "$BENCH_DIR/scripts/up.sh" "$sys" > "$run/up.log" 2>&1; then
     log "FAILED up $run"; "$BENCH_DIR/scripts/down.sh" "$sys" >/dev/null 2>&1 || true; continue
