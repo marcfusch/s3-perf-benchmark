@@ -689,9 +689,9 @@ nodes.sort_by_key(|(diffnode, diffzone, ping, _to)| (*diffnode, *diffzone, *ping
 ```
 
 With 3 copies on 3 nodes, a healthy gateway already holds every block. MinIO and
-SeaweedFS still read about a third of the data from the slow node, which sends 19 to
-23 MiB/s: its link is capped at 200 Mbit/s (about 24 MiB/s), so it is full, and the
-whole cluster waits for it. For MinIO this fits erasure coding, where 2 of the 3 pieces
+SeaweedFS still fetch data from the slow node, which sends 19 to 23 MiB/s to the other
+nodes: its link is capped at 200 Mbit/s (about 24 MiB/s), so it is full, and the whole
+cluster waits for it. For MinIO this fits erasure coding, where 2 of the 3 pieces
 of an object are needed to rebuild it.
 
 == An old hard disk in the cluster
